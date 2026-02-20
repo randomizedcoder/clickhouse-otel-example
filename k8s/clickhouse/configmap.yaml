@@ -1,0 +1,113 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-config
+  namespace: otel-demo
+  labels:
+    app: clickhouse
+data:
+  config.xml: |
+    <?xml version="1.0"?>
+    <clickhouse>
+        <logger>
+            <level>information</level>
+            <console>1</console>
+        </logger>
+
+        <http_port>8123</http_port>
+        <tcp_port>9000</tcp_port>
+        <interserver_http_port>9009</interserver_http_port>
+
+        <listen_host>0.0.0.0</listen_host>
+
+        <path>/var/lib/clickhouse/</path>
+        <tmp_path>/var/lib/clickhouse/tmp/</tmp_path>
+        <user_files_path>/var/lib/clickhouse/user_files/</user_files_path>
+
+        <users_config>users.xml</users_config>
+        <default_database>default</default_database>
+
+        <mlock_executable>false</mlock_executable>
+
+        <max_connections>100</max_connections>
+        <keep_alive_timeout>3</keep_alive_timeout>
+        <max_concurrent_queries>100</max_concurrent_queries>
+
+        <mark_cache_size>5368709120</mark_cache_size>
+    </clickhouse>
+
+  users.xml: |
+    <?xml version="1.0"?>
+    <clickhouse>
+        <users>
+            <default>
+                <password></password>
+                <networks>
+                    <ip>::/0</ip>
+                </networks>
+                <profile>default</profile>
+                <quota>default</quota>
+                <access_management>1</access_management>
+            </default>
+        </users>
+        <profiles>
+            <default>
+                <max_memory_usage>10000000000</max_memory_usage>
+                <load_balancing>random</load_balancing>
+            </default>
+        </profiles>
+        <quotas>
+            <default>
+                <interval>
+                    <duration>3600</duration>
+                    <queries>0</queries>
+                    <errors>0</errors>
+                    <result_rows>0</result_rows>
+                    <read_rows>0</read_rows>
+                    <execution_time>0</execution_time>
+                </interval>
+            </default>
+        </quotas>
+    </clickhouse>
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-init
+  namespace: otel-demo
+  labels:
+    app: clickhouse
+data:
+  init.sql: |
+    -- HyperDX compatible OTel logs schema
+    CREATE TABLE IF NOT EXISTS default.otel_logs (
+        Timestamp DateTime64(9) CODEC(Delta, ZSTD(1)),
+        TraceId String CODEC(ZSTD(1)),
+        SpanId String CODEC(ZSTD(1)),
+        TraceFlags UInt32 CODEC(ZSTD(1)),
+        SeverityText LowCardinality(String) CODEC(ZSTD(1)),
+        SeverityNumber Int32 CODEC(ZSTD(1)),
+        ServiceName LowCardinality(String) CODEC(ZSTD(1)),
+        Body String CODEC(ZSTD(1)),
+        ResourceSchemaUrl String CODEC(ZSTD(1)),
+        ResourceAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+        ScopeSchemaUrl String CODEC(ZSTD(1)),
+        ScopeName String CODEC(ZSTD(1)),
+        ScopeVersion String CODEC(ZSTD(1)),
+        ScopeAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+        LogAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+        RandomNumber Int32 CODEC(ZSTD(1)),
+        RandomString LowCardinality(String) CODEC(ZSTD(1)),
+        Count UInt64 CODEC(Delta, ZSTD(1)),
+        INDEX idx_trace_id TraceId TYPE bloom_filter(0.001) GRANULARITY 1,
+        INDEX idx_severity SeverityText TYPE set(25) GRANULARITY 1,
+        INDEX idx_service ServiceName TYPE set(100) GRANULARITY 1,
+        INDEX idx_random_number RandomNumber TYPE minmax GRANULARITY 1,
+        INDEX idx_random_string RandomString TYPE set(10) GRANULARITY 1,
+        INDEX idx_body Body TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 1
+    )
+    ENGINE = MergeTree()
+    PARTITION BY toDate(Timestamp)
+    ORDER BY (ServiceName, Timestamp)
+    TTL toDateTime(Timestamp) + INTERVAL 7 DAY
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;

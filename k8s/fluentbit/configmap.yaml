@@ -1,0 +1,189 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentbit-config
+  namespace: otel-demo
+  labels:
+    app: fluentbit
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush        1
+        Log_Level    info
+        Daemon       Off
+        HTTP_Server  On
+        HTTP_Listen  0.0.0.0
+        HTTP_Port    2020
+        Health_Check On
+        HC_Errors_Count 5
+        HC_Retry_Failure_Count 5
+        HC_Period    5
+        Parsers_File /fluent-bit/etc/parsers.conf
+
+    @INCLUDE /fluent-bit/etc/inputs.conf
+    @INCLUDE /fluent-bit/etc/filters.conf
+    @INCLUDE /fluent-bit/etc/outputs.conf
+
+  inputs.conf: |
+    [INPUT]
+        Name              tail
+        Tag               kube.loggen.*
+        Path              /var/log/containers/loggen-*.log
+        Parser            docker
+        Refresh_Interval  5
+        Rotate_Wait       30
+        Mem_Buf_Limit     10MB
+        Skip_Long_Lines   On
+        DB                /var/lib/fluent-bit/tail.db
+        DB.Sync           Normal
+
+  filters.conf: |
+    [FILTER]
+        Name          parser
+        Match         kube.loggen.*
+        Key_Name      log
+        Parser        json
+        Reserve_Data  On
+
+    [FILTER]
+        Name          lua
+        Match         kube.loggen.*
+        script        /fluent-bit/scripts/transform.lua
+        call          transform_to_otel
+
+  outputs.conf: |
+    [OUTPUT]
+        Name          http
+        Match         *
+        Host          clickhouse.otel-demo.svc.cluster.local
+        Port          8123
+        URI           /?query=INSERT%20INTO%20otel_logs%20FORMAT%20JSONEachRow
+        Format        json_lines
+        Json_Date_Key false
+        Retry_Limit   5
+        Workers       2
+        Header        Content-Type application/json
+
+  parsers.conf: |
+    [PARSER]
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+        Time_Keep   On
+
+    [PARSER]
+        Name        json
+        Format      json
+        Time_Key    ts
+        Time_Format %s.%L
+
+  transform.lua: |
+    -- Severity mapping from zap log levels to OTel severity numbers
+    local severity_number = {
+        debug   = 5,
+        info    = 9,
+        warn    = 13,
+        warning = 13,
+        error   = 17,
+        dpanic  = 21,
+        panic   = 21,
+        fatal   = 21,
+    }
+
+    local severity_text = {
+        debug   = "DEBUG",
+        info    = "INFO",
+        warn    = "WARN",
+        warning = "WARN",
+        error   = "ERROR",
+        dpanic  = "FATAL",
+        panic   = "FATAL",
+        fatal   = "FATAL",
+    }
+
+    local function format_timestamp(ts)
+        if type(ts) ~= "number" then
+            return os.date("!%Y-%m-%d %H:%M:%S.000000000")
+        end
+        local seconds = math.floor(ts)
+        local nanos = math.floor((ts - seconds) * 1e9)
+        local date_str = os.date("!%Y-%m-%d %H:%M:%S", seconds)
+        return string.format("%s.%09d", date_str, nanos)
+    end
+
+    local function map_to_json(tbl)
+        if type(tbl) ~= "table" then return "{}" end
+        local parts = {}
+        for k, v in pairs(tbl) do
+            local key = tostring(k)
+            local val = tostring(v):gsub('"', '\\"')
+            table.insert(parts, string.format('"%s":"%s"', key, val))
+        end
+        return "{" .. table.concat(parts, ",") .. "}"
+    end
+
+    local function parse_k8s_tag(tag)
+        if not tag then return "unknown", "unknown", "unknown" end
+        local namespace, pod, container = string.match(tag, "kube%.loggen%.([^_]+)_([^_]+)_(.+)")
+        return namespace or "unknown", pod or "unknown", container or "unknown"
+    end
+
+    local function try_parse_json(log_str)
+        if type(log_str) == "string" and log_str:match('^%s*{') then
+            local level = log_str:match('"level"%s*:%s*"([^"]+)"')
+            local ts = log_str:match('"ts"%s*:%s*([%d%.]+)')
+            local msg = log_str:match('"msg"%s*:%s*"([^"]+)"')
+            local caller = log_str:match('"caller"%s*:%s*"([^"]+)"')
+            local count = log_str:match('"count"%s*:%s*(%d+)')
+            local random_number = log_str:match('"random_number"%s*:%s*(%d+)')
+            local random_string = log_str:match('"random_string"%s*:%s*"([^"]+)"')
+            if level and ts then
+                return {
+                    level = level, ts = tonumber(ts), msg = msg, caller = caller,
+                    count = tonumber(count) or 0, random_number = tonumber(random_number) or 0,
+                    random_string = random_string or "",
+                }
+            end
+        end
+        return nil
+    end
+
+    function transform_to_otel(tag, timestamp, record)
+        local namespace, pod, container = parse_k8s_tag(tag)
+        local log_data = record
+        if record.log and type(record.log) == "string" then
+            local parsed = try_parse_json(record.log)
+            if parsed then log_data = parsed end
+        end
+
+        local level = log_data.level or "info"
+        local ts = log_data.ts or timestamp
+        local msg = log_data.msg or ""
+        local caller = log_data.caller or ""
+        local count = log_data.count or 0
+        local random_number = log_data.random_number or 0
+        local random_string = log_data.random_string or ""
+
+        local otel_record = {
+            Timestamp = format_timestamp(ts),
+            TraceId = "", SpanId = "", TraceFlags = 0,
+            SeverityText = severity_text[level] or "INFO",
+            SeverityNumber = severity_number[level] or 9,
+            ServiceName = "loggen",
+            Body = msg,
+            ResourceSchemaUrl = "",
+            ResourceAttributes = map_to_json({
+                ["service.name"] = "loggen", ["service.version"] = "1.0.0",
+                ["k8s.namespace.name"] = namespace, ["k8s.pod.name"] = pod,
+                ["k8s.container.name"] = container,
+            }),
+            ScopeSchemaUrl = "", ScopeName = "loggen", ScopeVersion = "1.0.0",
+            ScopeAttributes = "{}",
+            LogAttributes = map_to_json({["caller"] = caller}),
+            RandomNumber = random_number,
+            RandomString = random_string,
+            Count = count,
+        }
+        return 1, timestamp, otel_record
+    end
