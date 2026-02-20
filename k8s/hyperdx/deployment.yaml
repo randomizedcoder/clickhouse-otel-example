@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hyperdx
+  namespace: otel-demo
+  labels:
+    app: hyperdx
+    app.kubernetes.io/name: hyperdx
+    app.kubernetes.io/component: visualization
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hyperdx
+  template:
+    metadata:
+      labels:
+        app: hyperdx
+    spec:
+      containers:
+        - name: hyperdx
+          image: hyperdx/hyperdx:latest
+          imagePullPolicy: IfNotPresent  # Pull from registry
+          env:
+            # ClickHouse connection
+            - name: CLICKHOUSE_HOST
+              value: "clickhouse.otel-demo.svc.cluster.local"
+            - name: CLICKHOUSE_PORT
+              value: "8123"
+            - name: CLICKHOUSE_USER
+              value: "default"
+            - name: CLICKHOUSE_PASSWORD
+              value: ""
+            # Disable authentication for demo
+            - name: HYPERDX_AUTH_DISABLED
+              value: "true"
+            # API URL for frontend
+            - name: NEXT_PUBLIC_API_URL
+              value: "http://localhost:28000"
+            # Server ports
+            - name: PORT
+              value: "8000"
+            - name: FRONTEND_PORT
+              value: "8080"
+          ports:
+            - name: api
+              containerPort: 8000
+              protocol: TCP
+            - name: ui
+              containerPort: 8080
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: api
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "250m"
+            limits:
+              memory: "1Gi"
+              cpu: "1000m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hyperdx
+  namespace: otel-demo
+  labels:
+    app: hyperdx
+spec:
+  type: NodePort
+  ports:
+    - name: api
+      port: 8000
+      targetPort: 8000
+      nodePort: 30800
+      protocol: TCP
+    - name: ui
+      port: 8080
+      targetPort: 8080
+      nodePort: 30808
+      protocol: TCP
+  selector:
+    app: hyperdx

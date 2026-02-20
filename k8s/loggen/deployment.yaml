@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loggen
+  namespace: otel-demo
+  labels:
+    app: loggen
+    app.kubernetes.io/name: loggen
+    app.kubernetes.io/component: log-generator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: loggen
+  template:
+    metadata:
+      labels:
+        app: loggen
+    spec:
+      containers:
+        - name: loggen
+          image: loggen:latest
+          imagePullPolicy: Never  # Use locally loaded image
+          env:
+            - name: LOGGEN_MAX_NUMBER
+              value: "100"
+            - name: LOGGEN_NUM_STRINGS
+              value: "10"
+            - name: LOGGEN_SLEEP_DURATION
+              value: "5s"
+            - name: LOGGEN_HEALTH_PORT
+              value: "8081"
+          ports:
+            - name: health
+              containerPort: 8081
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "10m"
+            limits:
+              memory: "64Mi"
+              cpu: "100m"
+          securityContext:
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65534
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL

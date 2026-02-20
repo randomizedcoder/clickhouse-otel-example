@@ -1,0 +1,124 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: clickhouse
+  namespace: otel-demo
+  labels:
+    app: clickhouse
+    app.kubernetes.io/name: clickhouse
+    app.kubernetes.io/component: database
+spec:
+  serviceName: clickhouse
+  replicas: 1
+  selector:
+    matchLabels:
+      app: clickhouse
+  template:
+    metadata:
+      labels:
+        app: clickhouse
+    spec:
+      initContainers:
+        # Init container to run the schema initialization
+        - name: init-schema
+          image: clickhouse:latest
+          imagePullPolicy: Never
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Wait for ClickHouse to be ready
+              sleep 5
+              # Run init SQL
+              clickhouse-client --host localhost --query "$(cat /docker-entrypoint-initdb.d/init.sql)" || true
+          volumeMounts:
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+      containers:
+        - name: clickhouse
+          image: clickhouse:latest
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 8123
+              protocol: TCP
+            - name: native
+              containerPort: 9000
+              protocol: TCP
+            - name: interserver
+              containerPort: 9009
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+            - name: config
+              mountPath: /etc/clickhouse-server/config.xml
+              subPath: config.xml
+            - name: config
+              mountPath: /etc/clickhouse-server/users.xml
+              subPath: users.xml
+            - name: init
+              mountPath: /docker-entrypoint-initdb.d
+          resources:
+            requests:
+              memory: "1Gi"
+              cpu: "500m"
+            limits:
+              memory: "2Gi"
+              cpu: "2000m"
+      volumes:
+        - name: config
+          configMap:
+            name: clickhouse-config
+        - name: init
+          configMap:
+            name: clickhouse-init
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clickhouse
+  namespace: otel-demo
+  labels:
+    app: clickhouse
+spec:
+  type: ClusterIP
+  ports:
+    - name: http
+      port: 8123
+      targetPort: 8123
+      protocol: TCP
+    - name: native
+      port: 9000
+      targetPort: 9000
+      protocol: TCP
+    - name: interserver
+      port: 9009
+      targetPort: 9009
+      protocol: TCP
+  selector:
+    app: clickhouse

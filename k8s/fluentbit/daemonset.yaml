@@ -1,0 +1,130 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluentbit
+  namespace: otel-demo
+  labels:
+    app: fluentbit
+    app.kubernetes.io/name: fluentbit
+    app.kubernetes.io/component: log-collector
+spec:
+  selector:
+    matchLabels:
+      app: fluentbit
+  template:
+    metadata:
+      labels:
+        app: fluentbit
+    spec:
+      serviceAccountName: fluentbit
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
+          effect: NoSchedule
+      containers:
+        - name: fluentbit
+          image: fluentbit:latest
+          imagePullPolicy: Never
+          ports:
+            - name: metrics
+              containerPort: 2020
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/v1/health
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log
+              readOnly: true
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+            - name: config
+              mountPath: /fluent-bit/etc
+            - name: scripts
+              mountPath: /fluent-bit/scripts
+            - name: db
+              mountPath: /var/lib/fluent-bit
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+          securityContext:
+            runAsUser: 0  # Need root to read log files
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - DAC_READ_SEARCH  # Read log files
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log
+        - name: varlibdockercontainers
+          hostPath:
+            path: /var/lib/docker/containers
+        - name: config
+          configMap:
+            name: fluentbit-config
+            items:
+              - key: fluent-bit.conf
+                path: fluent-bit.conf
+              - key: inputs.conf
+                path: inputs.conf
+              - key: filters.conf
+                path: filters.conf
+              - key: outputs.conf
+                path: outputs.conf
+              - key: parsers.conf
+                path: parsers.conf
+        - name: scripts
+          configMap:
+            name: fluentbit-config
+            items:
+              - key: transform.lua
+                path: transform.lua
+        - name: db
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: fluentbit
+  namespace: otel-demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: fluentbit
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: fluentbit
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: fluentbit
+subjects:
+  - kind: ServiceAccount
+    name: fluentbit
+    namespace: otel-demo
