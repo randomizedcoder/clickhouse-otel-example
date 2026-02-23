@@ -1,6 +1,6 @@
 # ClickHouse OpenTelemetry Pipeline Demo
 
-**Last Updated:** 2026-02-19
+**Last Updated:** 2026-02-23
 
 A complete demonstration of an OpenTelemetry logs pipeline using Nix for reproducible builds. The pipeline collects JSON logs from a Go application, transforms them to OTel format via FluentBit, stores them in ClickHouse, and visualizes them with HyperDX.
 
@@ -19,12 +19,14 @@ A complete demonstration of an OpenTelemetry logs pipeline using Nix for reprodu
 
 All components are built reproducibly with Nix - no Docker Hub pulls required.
 
-| Component | Description | Image Size | Status |
-|-----------|-------------|------------|--------|
+| Component | Description | Image Size* | Status |
+|-----------|-------------|-------------|--------|
 | **loggen** | Go application generating random JSON logs | 3.3 MB | ✅ Working |
 | **fluentbit** | Log collector with Lua OTel transformation | 75 MB | ✅ Working |
 | **clickhouse** | Column-oriented database for log storage | 355 MB | ✅ Working |
-| **hyperdx** | Observability UI (built from source) | 698 MB | ✅ Working |
+| **hyperdx** | Observability UI (built from source) | 698 MB | ⚠️ Requires MongoDB |
+
+*Compressed image sizes. Docker reports larger uncompressed sizes when loaded.
 
 ## Features
 
@@ -234,6 +236,7 @@ HyperDX is built from source using:
 - **yarn-berry** from nixpkgs for Yarn 4 support
 - **fetchYarnBerryDeps** for reproducible offline builds
 - Local fonts (Inter, IBM Plex Mono, Roboto, Roboto Mono) from nixpkgs to avoid Google Fonts CDN access during build
+- **tsconfig-paths/register** at runtime to resolve TypeScript path aliases (`@/*` → `build/src/*`)
 
 ### FluentBit Configuration
 FluentBit uses a Lua script (`nix/lua/transform.lua`) to transform JSON logs to OpenTelemetry format before sending to ClickHouse.
@@ -241,9 +244,18 @@ FluentBit uses a Lua script (`nix/lua/transform.lua`) to transform JSON logs to 
 ### ClickHouse Schema
 The `otel_logs` table is compatible with HyperDX's expected schema, including proper timestamp handling and JSON body storage.
 
-## Next Steps: Integration Testing
+## Integration Testing
 
-The following integration tests need to be performed to validate the complete pipeline:
+### Verified Components
+
+The following components have been tested and verified working:
+
+| Component | Test | Result |
+|-----------|------|--------|
+| **loggen** | Container produces JSON logs | ✅ Pass |
+| **clickhouse** | HTTP API responds to queries | ✅ Pass |
+| **hyperdx** | Next.js frontend starts | ✅ Pass |
+| **hyperdx** | API loads (requires MongoDB) | ⚠️ Needs MongoDB |
 
 ### 1. Local Container Testing
 
