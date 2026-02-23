@@ -100,12 +100,15 @@ EOF
     runHook preBuild
 
     # Build common-utils first (dependency for other packages)
+    echo "Building common-utils..."
     yarn workspace @hyperdx/common-utils build || true
 
-    # Build API
+    # Build API (TypeScript compiles to build/src/)
+    echo "Building API..."
     yarn workspace @hyperdx/api build || true
 
     # Build App (Next.js) with standalone output
+    echo "Building App..."
     yarn workspace @hyperdx/app build || true
 
     runHook postBuild
@@ -120,6 +123,19 @@ EOF
     mkdir -p $out/app/packages/api
     cp -r packages/api/build $out/app/packages/api/ 2>/dev/null || true
     cp packages/api/package.json $out/app/packages/api/ 2>/dev/null || true
+
+    # Create runtime tsconfig for path alias resolution
+    # The @/* path alias needs to resolve to build/src/* at runtime
+    cat > $out/app/packages/api/tsconfig.json << 'TSCONFIG'
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["build/src/*"]
+    }
+  }
+}
+TSCONFIG
 
     # Copy App build (Next.js standalone)
     mkdir -p $out/app/packages/app
@@ -155,7 +171,9 @@ export HYPERDX_APP_PORT=''${HYPERDX_APP_PORT:-${toString ports.services.hyperdxA
 echo "Starting HyperDX API on port $HYPERDX_API_PORT"
 echo "Starting HyperDX App on port $HYPERDX_APP_PORT"
 
-node packages/api/build/index.js &
+# Use tsconfig-paths to resolve @/* path aliases at runtime
+# Run in subshell to preserve working directory
+(cd packages/api && node -r tsconfig-paths/register build/src/index.js) &
 API_PID=$!
 
 # Next.js standalone in monorepo creates nested structure

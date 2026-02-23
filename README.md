@@ -327,6 +327,18 @@ minikube status
 kubectl get pods -A
 ```
 
+### HyperDX Environment Variables
+
+HyperDX requires MongoDB and additional configuration. Key environment variables:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `MONGO_URI` | Yes | MongoDB connection string for session storage |
+| `CLICKHOUSE_HOST` | Yes | ClickHouse server host |
+| `CLICKHOUSE_PORT` | No | ClickHouse HTTP port (default: 8123) |
+| `HYPERDX_API_PORT` | No | API server port (default: 8000) |
+| `HYPERDX_APP_PORT` | No | Next.js app port (default: 8080) |
+
 ### Known Limitations
 
 - HyperDX requires MongoDB for session storage (not included in this demo)
