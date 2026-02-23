@@ -150,11 +150,29 @@ TSCONFIG
     cp -r packages/common-utils/dist $out/app/packages/common-utils/ 2>/dev/null || true
     cp packages/common-utils/package.json $out/app/packages/common-utils/ 2>/dev/null || true
 
-    # Copy node_modules (excluding broken workspace symlinks)
+    # Copy node_modules for API runtime dependencies
+    # (Next.js standalone already has its own bundled node_modules)
     cp -r node_modules $out/app/ 2>/dev/null || true
+
+    # Remove dev-only packages (saves ~300+ MB)
+    echo "Removing dev-only packages..."
+    rm -rf $out/app/node_modules/{typescript,eslint,eslint-*,@typescript-eslint,prettier,@changesets,nx,@nx,@nrwl,jest,@jest,ts-jest,jest-*,@testing-library,nodemon,ts-node,@types,tsup,vitest,@vitest,husky,lint-staged,concurrently,rimraf,knip,playwright,playwright-core,chromatic,stylelint,stylelint-*,jsdom,storybook,@storybook}
+
+    # Remove Next.js packages - already bundled in standalone (saves ~266 MB)
+    echo "Removing duplicated Next.js packages..."
+    rm -rf $out/app/node_modules/{next,@next}
+
+    # Remove React and frontend packages - already bundled in Next.js standalone
+    rm -rf $out/app/node_modules/{react,react-dom,@tabler,@mantine,@tanstack,@hookform,@radix-ui,@emotion,styled-components,framer-motion,recharts,rrweb,d3,d3-*}
+
+    # Remove other large dev/build tools
+    rm -rf $out/app/node_modules/{webpack,@swc,esbuild,@esbuild,turbo,@turbo,postcss,autoprefixer,tailwindcss,sass,@babel,core-js,core-js-pure}
 
     # Remove broken symlinks to workspace packages we didn't include
     find $out/app/node_modules -type l ! -exec test -e {} \; -delete 2>/dev/null || true
+
+    echo "Final node_modules size:"
+    du -sh $out/app/node_modules || true
 
     # Create start script
     # Note: Next.js standalone in a monorepo creates nested packages/ structure

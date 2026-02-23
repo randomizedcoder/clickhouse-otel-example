@@ -150,15 +150,41 @@ These should NOT be in production:
 
 **None needed** - standalone build is self-contained.
 
-## Expected Size After Fix
+## Size After Fix (Implemented 2026-02-23)
 
-| Component | Current | Expected |
-|-----------|---------|----------|
-| node_modules (root) | 1.3 GB | 0 MB (removed) |
-| packages/app (standalone) | 135 MB | 135 MB |
-| packages/api + deps | 2.3 MB | ~50-100 MB |
-| packages/common-utils | 1.1 MB | 1.1 MB |
-| **Total** | **1.3 GB** | **~200-250 MB** |
+| Metric | Before | After | Reduction |
+|--------|--------|-------|-----------|
+| Compressed image | 698 MB | 406 MB | 42% |
+| Uncompressed (Docker) | 3.12 GB | 1.81 GB | 42% |
+| node_modules | 1.3 GB | 598 MB | 54% |
+
+### Packages Removed
+
+The following packages are now excluded from the production image:
+
+**Dev/Build tools (~150 MB):**
+- `typescript`, `ts-node`, `tsup`
+- `eslint`, `eslint-*`, `@typescript-eslint`
+- `prettier`, `stylelint`
+- `nx`, `@nx`, `@nrwl`
+- `jest`, `@jest`, `jest-*`, `ts-jest`
+- `@testing-library`, `vitest`, `@vitest`
+- `playwright`, `playwright-core`, `jsdom`
+- `chromatic`, `storybook`, `@storybook`
+- `husky`, `lint-staged`, `knip`
+- `@changesets`, `@types`
+
+**Duplicated in Next.js standalone (~300 MB):**
+- `next`, `@next`
+- `react`, `react-dom`
+- `@babel`, `webpack`, `@swc`, `esbuild`, `@esbuild`
+- `postcss`, `autoprefixer`, `tailwindcss`, `sass`
+- `core-js`, `core-js-pure`
+
+**Frontend packages (bundled in standalone):**
+- `@tabler`, `@mantine`, `@tanstack`, `@hookform`
+- `@radix-ui`, `@emotion`, `styled-components`
+- `framer-motion`, `recharts`, `rrweb`, `d3`, `d3-*`
 
 ## Implementation Steps
 

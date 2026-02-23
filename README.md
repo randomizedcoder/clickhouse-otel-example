@@ -24,7 +24,7 @@ All components are built reproducibly with Nix - no Docker Hub pulls required.
 | **loggen** | Go application generating random JSON logs | 3.3 MB | ✅ Working |
 | **fluentbit** | Log collector with Lua OTel transformation | 75 MB | ✅ Working |
 | **clickhouse** | Column-oriented database for log storage | 355 MB | ✅ Working |
-| **hyperdx** | Observability UI (built from source) | 698 MB | ⚠️ Requires MongoDB |
+| **hyperdx** | Observability UI (built from source) | 406 MB | ⚠️ Requires MongoDB |
 
 *Compressed image sizes. Docker reports larger uncompressed sizes when loaded.
 
