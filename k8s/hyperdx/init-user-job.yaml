@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: hyperdx-init-user
+  namespace: otel-demo
+  labels:
+    app: hyperdx-init
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: init-user
+          image: curlimages/curl:latest
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for HyperDX API to be ready..."
+              until curl -s http://hyperdx.otel-demo.svc.cluster.local:8000/health > /dev/null; do
+                echo "Waiting..."
+                sleep 5
+              done
+              echo "HyperDX API is ready"
+
+              echo "Creating demo user..."
+              RESULT=$(curl -s -w "\n%{http_code}" -X POST \
+                http://hyperdx.otel-demo.svc.cluster.local:8000/register/password \
+                -H "Content-Type: application/json" \
+                -d '{"email":"demo@example.com","password":"DemoPassword123!","confirmPassword":"DemoPassword123!"}')
+
+              HTTP_CODE=$(echo "$RESULT" | tail -n1)
+              BODY=$(echo "$RESULT" | sed '$d')
+
+              if [ "$HTTP_CODE" = "200" ]; then
+                echo "Demo user created successfully!"
+                echo "  Email: demo@example.com"
+                echo "  Password: DemoPassword123!"
+              elif [ "$HTTP_CODE" = "403" ] || [ "$HTTP_CODE" = "409" ]; then
+                echo "User already exists (this is OK)"
+              else
+                echo "Failed to create user: HTTP $HTTP_CODE"
+                echo "$BODY"
+                exit 1
+              fi

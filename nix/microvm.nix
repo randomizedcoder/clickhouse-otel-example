@@ -1,8 +1,17 @@
-{ config, lib, pkgs, self, flake-inputs, ... }:
+{ config, lib, pkgs, self, flake-inputs, k8sManifestsPath, ... }:
 
 let
   # Import port configuration
   ports = import ./ports.nix;
+
+  # Access flake packages for this system
+  packages = self.packages.x86_64-linux;
+
+  # Copy k8s manifests to a derivation
+  k8sManifests = pkgs.runCommand "k8s-manifests" { } ''
+    mkdir -p $out
+    cp -r ${k8sManifestsPath}/* $out/
+  '';
 in
 {
   # MicroVM configuration
@@ -19,7 +28,7 @@ in
       {
         mountPoint = "/var";
         image = "var.img";
-        size = 20480;  # 20GB for container images and data
+        size = 20480; # 20GB for container images and data
       }
     ];
 
@@ -40,6 +49,10 @@ in
       { from = "host"; host.port = ports.hostForwards.clickhouseNative; guest.port = ports.services.clickhouseNative; }
       { from = "host"; host.port = ports.hostForwards.hyperdxApi; guest.port = ports.services.hyperdxApi; }
       { from = "host"; host.port = ports.hostForwards.fluentbitMetrics; guest.port = ports.services.fluentbitMetrics; }
+      { from = "host"; host.port = ports.hostForwards.mongodb; guest.port = ports.services.mongodb; }
+      # NodePort forwards (minikube tunnel exposes these on VM localhost)
+      { from = "host"; host.port = ports.hostForwards.hyperdxApiNodePort; guest.port = ports.nodePorts.hyperdxApi; }
+      { from = "host"; host.port = ports.hostForwards.hyperdxAppNodePort; guest.port = ports.nodePorts.hyperdxApp; }
     ];
 
     # Socket for virtiofs
@@ -55,7 +68,7 @@ in
   # Basic system configuration
   networking = {
     hostName = "otel-demo";
-    firewall.enable = false;  # Disable for easier demo access
+    firewall.enable = false; # Disable for easier demo access
   };
 
   # Enable SSH for access
@@ -95,6 +108,7 @@ in
     minikube
     kubectl
     kubernetes-helm
+    kustomize
 
     # Container tools
     docker
@@ -118,12 +132,14 @@ in
     wants = [ "network-online.target" ];
     wantedBy = [ "multi-user.target" ];
 
+    path = [ pkgs.docker ];
+
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
       User = "root";
       Environment = "HOME=/root";
-      ExecStartPre = "${pkgs.coreutils}/bin/sleep 5";  # Wait for docker
+      ExecStartPre = "${pkgs.coreutils}/bin/sleep 5"; # Wait for docker
     };
 
     script = ''
@@ -133,11 +149,12 @@ in
         exit 0
       fi
 
-      # Start minikube with docker driver
+      # Start minikube with docker driver (--force needed for root)
       ${pkgs.minikube}/bin/minikube start \
         --driver=docker \
         --cpus=3 \
         --memory=6g \
+        --force \
         --wait=all
     '';
 
@@ -153,6 +170,8 @@ in
     requires = [ "minikube-start.service" ];
     wantedBy = [ "multi-user.target" ];
 
+    path = [ pkgs.docker ];
+
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
@@ -161,18 +180,31 @@ in
     };
 
     script = ''
-      # Wait for minikube to be fully ready
+      set -e
+
+      # Wait for minikube to be ready
       ${pkgs.minikube}/bin/minikube status || exit 1
 
       echo "Loading container images into Minikube..."
 
-      # The images will be available in /run/current-system/sw/share/images/
-      # or we can build them on-demand
+      # Load each image into minikube's docker daemon
+      echo "Loading loggen..."
+      ${pkgs.minikube}/bin/minikube image load ${packages.loggen-image}
 
-      # For now, just verify minikube is ready
-      ${pkgs.kubectl}/bin/kubectl get nodes
+      echo "Loading fluentbit..."
+      ${pkgs.minikube}/bin/minikube image load ${packages.fluentbit-image}
 
-      echo "Container images ready"
+      echo "Loading clickhouse..."
+      ${pkgs.minikube}/bin/minikube image load ${packages.clickhouse-image}
+
+      echo "Loading mongodb..."
+      ${pkgs.minikube}/bin/minikube image load ${packages.mongodb-image}
+
+      echo "Loading hyperdx..."
+      ${pkgs.minikube}/bin/minikube image load ${packages.hyperdx-image}
+
+      echo "All images loaded. Verifying..."
+      ${pkgs.minikube}/bin/minikube image ls
     '';
   };
 
@@ -191,28 +223,39 @@ in
     };
 
     script = ''
+      set -e
+
       # Wait for kubernetes to be ready
       ${pkgs.kubectl}/bin/kubectl wait --for=condition=Ready nodes --all --timeout=120s
 
-      # Apply manifests if they exist
-      if [ -d /etc/kubernetes/manifests ]; then
-        ${pkgs.kubectl}/bin/kubectl apply -f /etc/kubernetes/manifests/
-      fi
+      echo "Deploying k8s manifests with kustomize..."
+      ${pkgs.kubectl}/bin/kubectl apply -k ${k8sManifests}
+
+      echo "Waiting for deployments to be ready..."
+      ${pkgs.kubectl}/bin/kubectl -n otel-demo wait --for=condition=available deployment --all --timeout=300s || true
 
       echo "Kubernetes manifests deployed"
+      ${pkgs.kubectl}/bin/kubectl -n otel-demo get all
     '';
   };
 
-  # Copy Kubernetes manifests to the VM
-  environment.etc = {
-    "kubernetes/manifests/namespace.yaml".text = ''
-      apiVersion: v1
-      kind: Namespace
-      metadata:
-        name: otel-demo
-        labels:
-          app.kubernetes.io/name: otel-demo
-    '';
+  # Minikube tunnel service to expose NodePorts on VM localhost
+  systemd.services.minikube-tunnel = {
+    description = "Minikube Tunnel for NodePort Access";
+    after = [ "deploy-k8s-manifests.service" ];
+    requires = [ "deploy-k8s-manifests.service" ];
+    wantedBy = [ "multi-user.target" ];
+
+    path = [ pkgs.docker ];
+
+    serviceConfig = {
+      Type = "simple";
+      User = "root";
+      Environment = "HOME=/root";
+      ExecStart = "${pkgs.minikube}/bin/minikube tunnel --cleanup=true";
+      Restart = "on-failure";
+      RestartSec = "10s";
+    };
   };
 
   # Enable nix flakes in the VM
