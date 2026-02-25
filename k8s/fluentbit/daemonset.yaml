@@ -26,6 +26,9 @@ spec:
         - name: fluentbit
           image: fluentbit:latest
           imagePullPolicy: Never
+          args:
+            - -c
+            - /fluent-bit/etc/fluent-bit.conf
           ports:
             - name: metrics
               containerPort: 2020

@@ -1,0 +1,77 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: ferretdb
+  namespace: otel-demo
+  labels:
+    app: ferretdb
+    app.kubernetes.io/name: ferretdb
+    app.kubernetes.io/component: database
+spec:
+  serviceName: ferretdb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ferretdb
+  template:
+    metadata:
+      labels:
+        app: ferretdb
+    spec:
+      containers:
+        - name: ferretdb
+          image: ferretdb:latest
+          imagePullPolicy: Never
+          args:
+            - "--handler=sqlite"
+            - "--sqlite-url=file:/data/"
+            - "--listen-addr=:27017"
+          ports:
+            - name: mongodb
+              containerPort: 27017
+              protocol: TCP
+          livenessProbe:
+            tcpSocket:
+              port: 27017
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          readinessProbe:
+            tcpSocket:
+              port: 27017
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ferretdb
+  namespace: otel-demo
+  labels:
+    app: ferretdb
+spec:
+  type: ClusterIP
+  ports:
+    - name: mongodb
+      port: 27017
+      targetPort: 27017
+      protocol: TCP
+  selector:
+    app: ferretdb

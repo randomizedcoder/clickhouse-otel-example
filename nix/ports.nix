@@ -16,6 +16,9 @@
     clickhouseNative = 9000;
     clickhouseInterserver = 9009;
 
+    # MongoDB (HyperDX session storage)
+    mongodb = 27017;
+
     # HyperDX
     hyperdxApi = 8000;
     hyperdxApp = 8080;
@@ -35,6 +38,10 @@
     hyperdxApp = 28080;
     clickhouseHttp = 28123;
     clickhouseNative = 29000;
+    mongodb = 27017; # Standard port, unlikely to conflict
+    # NodePort forwards (via minikube tunnel on VM localhost)
+    hyperdxApiNodePort = 30800;
+    hyperdxAppNodePort = 30808;
   };
 
   # ============================================

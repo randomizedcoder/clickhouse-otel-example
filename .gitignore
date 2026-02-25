@@ -30,6 +30,17 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Built binaries
 loggen
+
+# Nix build results
 result
-result-hyperdx
+result-*
+
+# MicroVM images
+*.img
+*.qcow2
+
+# Container image tarballs
+*.tar.gz

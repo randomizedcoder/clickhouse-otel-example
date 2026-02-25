@@ -18,22 +18,6 @@ spec:
       labels:
         app: clickhouse
     spec:
-      initContainers:
-        # Init container to run the schema initialization
-        - name: init-schema
-          image: clickhouse:latest
-          imagePullPolicy: Never
-          command:
-            - /bin/sh
-            - -c
-            - |
-              # Wait for ClickHouse to be ready
-              sleep 5
-              # Run init SQL
-              clickhouse-client --host localhost --query "$(cat /docker-entrypoint-initdb.d/init.sql)" || true
-          volumeMounts:
-            - name: init
-              mountPath: /docker-entrypoint-initdb.d
       containers:
         - name: clickhouse
           image: clickhouse:latest

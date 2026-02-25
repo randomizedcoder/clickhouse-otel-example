@@ -207,3 +207,4 @@ The following packages are now excluded from the production image:
 - The Next.js standalone (107 MB internal node_modules) is correctly sized
 - The API's production deps should be ~50-100 MB max
 - Total image should be under 300 MB compressed, ~500 MB uncompressed
+- **MongoDB** is now included as a separate Nix-built container (~500 MB) for session storage

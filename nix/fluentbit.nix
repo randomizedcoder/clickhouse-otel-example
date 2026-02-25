@@ -4,25 +4,54 @@
 , fluent-bit
 }:
 
-# Use the nixpkgs fluent-bit package and add our custom configuration
+# FluentBit package with parameterized configuration
 let
+  # Import port configuration
+  ports = import ./ports.nix;
+
   # Base FluentBit from nixpkgs
   fluentbitBase = fluent-bit;
 
-  # Our custom configuration files
-  configDir = runCommand "fluentbit-config" { } ''
+  # Default configuration options
+  defaultConfig = {
+    # Service settings
+    flushInterval = 1;
+    logLevel = "info";
+    httpPort = ports.services.fluentbitMetrics;
+    httpListen = "0.0.0.0";
+    healthCheck = true;
+
+    # Input settings
+    inputPath = "/var/log/containers/loggen-*.log";
+    inputTag = "kube.loggen.*";
+    inputParser = "docker";
+    refreshInterval = 5;
+    rotateWait = 30;
+    memBufLimit = "10MB";
+    dbPath = "/var/lib/fluent-bit/tail.db";
+
+    # Output settings
+    outputHost = "clickhouse.otel-demo.svc.cluster.local";
+    outputPort = ports.services.clickhouseHttp;
+    outputUri = "/?query=INSERT%20INTO%20otel_logs%20FORMAT%20JSONEachRow";
+    outputRetryLimit = 5;
+    outputWorkers = 2;
+  };
+
+  # Build configuration files from config
+  mkConfigDir = config: runCommand "fluentbit-config" { } ''
     mkdir -p $out/etc/fluent-bit/lua
 
     # Main configuration
     cat > $out/etc/fluent-bit/fluent-bit.conf << 'MAINCONF'
 [SERVICE]
-    Flush        1
-    Log_Level    info
+    Flush        ${toString config.flushInterval}
+    Log_Level    ${config.logLevel}
     Daemon       Off
     HTTP_Server  On
-    HTTP_Listen  0.0.0.0
-    HTTP_Port    2020
-    Health_Check On
+    HTTP_Listen  ${config.httpListen}
+    HTTP_Port    ${toString config.httpPort}
+    Health_Check ${if config.healthCheck then "On" else "Off"}
     HC_Errors_Count 5
     HC_Retry_Failure_Count 5
     HC_Period    5
@@ -37,14 +66,14 @@ MAINCONF
     cat > $out/etc/fluent-bit/inputs.conf << 'INPUTCONF'
 [INPUT]
     Name              tail
-    Tag               kube.loggen.*
-    Path              /var/log/containers/loggen-*.log
-    Parser            docker
-    Refresh_Interval  5
-    Rotate_Wait       30
-    Mem_Buf_Limit     10MB
+    Tag               ${config.inputTag}
+    Path              ${config.inputPath}
+    Parser            ${config.inputParser}
+    Refresh_Interval  ${toString config.refreshInterval}
+    Rotate_Wait       ${toString config.rotateWait}
+    Mem_Buf_Limit     ${config.memBufLimit}
     Skip_Long_Lines   On
-    DB                /var/lib/fluent-bit/tail.db
+    DB                ${config.dbPath}
     DB.Sync           Normal
 INPUTCONF
 
@@ -52,14 +81,14 @@ INPUTCONF
     cat > $out/etc/fluent-bit/filters.conf << 'FILTERCONF'
 [FILTER]
     Name          parser
-    Match         kube.loggen.*
+    Match         ${config.inputTag}
     Key_Name      log
     Parser        json
     Reserve_Data  On
 
 [FILTER]
     Name          lua
-    Match         kube.loggen.*
+    Match         ${config.inputTag}
     script        /etc/fluent-bit/lua/transform.lua
     call          transform_to_otel
 FILTERCONF
@@ -69,13 +98,13 @@ FILTERCONF
 [OUTPUT]
     Name          http
     Match         *
-    Host          clickhouse.otel-demo.svc.cluster.local
-    Port          8123
-    URI           /?query=INSERT%20INTO%20otel_logs%20FORMAT%20JSONEachRow
+    Host          ${config.outputHost}
+    Port          ${toString config.outputPort}
+    URI           ${config.outputUri}
     Format        json_lines
     Json_Date_Key false
-    Retry_Limit   5
-    Workers       2
+    Retry_Limit   ${toString config.outputRetryLimit}
+    Workers       ${toString config.outputWorkers}
     Header        Content-Type application/json
 OUTPUTCONF
 
@@ -99,12 +128,29 @@ PARSERSCONF
     cp ${./lua/transform.lua} $out/etc/fluent-bit/lua/transform.lua
   '';
 
-in
-pkgs.symlinkJoin {
-  name = "fluent-bit-configured";
-  paths = [ fluentbitBase configDir ];
+  # Create a configured FluentBit derivation
+  mkFluentbit = configOverrides:
+    let
+      config = defaultConfig // configOverrides;
+      configDir = mkConfigDir config;
+    in
+    pkgs.symlinkJoin {
+      name = "fluent-bit-configured";
+      paths = [ fluentbitBase configDir ];
 
-  meta = fluentbitBase.meta // {
-    description = "FluentBit with OTel transformation configuration";
-  };
+      meta = fluentbitBase.meta // {
+        description = "FluentBit with OTel transformation configuration";
+      };
+    };
+
+in
+{
+  # Default package for container use (backward compatible)
+  package = mkFluentbit { };
+
+  # Allow creating custom configurations
+  inherit mkFluentbit defaultConfig;
+
+  # Re-export for convenience
+  inherit (ports.services) fluentbitMetrics clickhouseHttp;
 }

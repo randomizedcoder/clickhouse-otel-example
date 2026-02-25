@@ -10,7 +10,12 @@ resources:
   - fluentbit/daemonset.yaml
   - clickhouse/configmap.yaml
   - clickhouse/statefulset.yaml
+  # MongoDB backend (required for HyperDX - FerretDB lacks TTL index support)
+  - mongodb/statefulset.yaml
+  # FerretDB backend (lightweight but lacks expireAfterSeconds TTL index support)
+  # - ferretdb/statefulset.yaml
   - hyperdx/deployment.yaml
+  - hyperdx/init-user-job.yaml
 
 commonLabels:
   app.kubernetes.io/part-of: otel-demo
