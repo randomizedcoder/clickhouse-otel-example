@@ -32,6 +32,11 @@
           clickhouseModule = pkgs.callPackage ./nix/clickhouse.nix { };
           clickhouse = clickhouseModule.package;
 
+          # Minimal ClickHouse build (smaller binary, fewer features)
+          # See docs/CLICKHOUSE_SIZE_OPTIMIZATION.md
+          clickhouseMinimalModule = pkgs.callPackage ./nix/clickhouse.nix { useMinimal = true; };
+          clickhouseMinimal = clickhouseMinimalModule.package;
+
           # HyperDX package (uses Yarn Berry v4)
           hyperdx = pkgs.callPackage ./nix/hyperdx.nix {
             inherit (pkgs) yarn-berry inter ibm-plex roboto roboto-mono;
@@ -40,6 +45,12 @@
           # Container images
           containers = pkgs.callPackage ./nix/containers.nix {
             inherit goApp fluentbit clickhouse hyperdx;
+          };
+
+          # Container images with minimal ClickHouse
+          containersMinimal = pkgs.callPackage ./nix/containers.nix {
+            inherit goApp fluentbit hyperdx;
+            clickhouse = clickhouseMinimal;
           };
 
           # Verification scripts (modular)
@@ -98,6 +109,10 @@
             # FluentBit binary
             fluentbit = fluentbit;
 
+            # ClickHouse minimal build (smaller binary for OTEL pipeline)
+            # See docs/CLICKHOUSE_SIZE_OPTIMIZATION.md
+            clickhouse-minimal = clickhouseMinimal;
+
             # HyperDX
             hyperdx = hyperdx;
 
@@ -105,6 +120,7 @@
             loggen-image = containers.loggenImage;
             fluentbit-image = containers.fluentbitImage;
             clickhouse-image = containers.clickhouseImage;
+            clickhouse-minimal-image = containersMinimal.clickhouseImage;
             mongodb-image = containers.mongodbImage;
             ferretdb-image = containers.ferretdbImage;
             hyperdx-image = containers.hyperdxImage;

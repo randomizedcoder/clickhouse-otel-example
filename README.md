@@ -37,7 +37,7 @@ All components are built reproducibly with Nix - no Docker Hub pulls required.
 |-----------|-------------|-------------|--------|
 | **loggen** | Go application generating random JSON logs | 3.3 MB | ✅ Working |
 | **fluentbit** | Log collector with Lua OTel transformation | 75 MB | ✅ Working |
-| **clickhouse** | Column-oriented database for log storage | 355 MB | ✅ Working |
+| **clickhouse** | Column-oriented database for log storage | 355 MB (293 MB minimal) | ✅ Working |
 | **mongodb** | Document database for HyperDX session storage | ~500 MB | ✅ Working |
 | **ferretdb** | MongoDB-compatible with SQLite backend | ~50 MB | ⚠️ Limited* |
 | **hyperdx** | Observability UI (built from source) | 406 MB | ✅ Working |
@@ -419,6 +419,34 @@ FluentBit uses a Lua script (`nix/lua/transform.lua`) to transform JSON logs to 
 
 ### ClickHouse Schema
 The `otel_logs` table is compatible with HyperDX's expected schema, including proper timestamp handling and JSON body storage.
+
+### ClickHouse Size Optimization
+
+A minimal ClickHouse build is available that disables unused features to reduce container size:
+
+| Build | Binary | Container | Features Disabled |
+|-------|--------|-----------|-------------------|
+| **Full** | 748 MB | 355 MB | None (all features) |
+| **Minimal** | 535 MB | 293 MB | Kafka, S3, MySQL, PostgreSQL, gRPC, Parquet, LLVM JIT, etc. |
+
+The minimal build retains all features needed for the OTEL logging pipeline:
+- MergeTree/SummingMergeTree engines
+- JSONEachRow format (FluentBit integration)
+- ZSTD/Delta compression
+- Bloom filter indexes
+
+**Usage:**
+```bash
+# Build minimal ClickHouse
+nix build .#clickhouse-minimal
+
+# Build minimal container image
+nix build .#clickhouse-minimal-image
+```
+
+**Implementation:** [`nix/clickhouse-minimal.nix`](nix/clickhouse-minimal.nix)
+
+**Detailed analysis:** [`docs/CLICKHOUSE_SIZE_OPTIMIZATION.md`](docs/CLICKHOUSE_SIZE_OPTIMIZATION.md)
 
 ## Pipeline Verification
 
