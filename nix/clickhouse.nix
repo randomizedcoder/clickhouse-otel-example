@@ -1,12 +1,20 @@
 { lib
 , pkgs
 , runCommand
+  # Set to true to use minimal ClickHouse build (smaller binary, fewer features)
+  # See docs/CLICKHOUSE_SIZE_OPTIMIZATION.md for details
+, useMinimal ? false
 }:
 
 # ClickHouse package with custom configuration for OTel logs storage
 let
   # Import port configuration
   ports = import ./ports.nix;
+
+  # Select ClickHouse package based on useMinimal flag
+  clickhouseBase = if useMinimal
+    then import ./clickhouse-minimal.nix { inherit pkgs; }
+    else pkgs.clickhouse;
 
   # Configuration options with defaults
   defaultConfig = {
@@ -119,11 +127,12 @@ EOF
       configDir = mkConfigDir config;
     in
     pkgs.symlinkJoin {
-      name = "clickhouse-configured";
-      paths = [ pkgs.clickhouse configDir ];
+      name = if useMinimal then "clickhouse-minimal-configured" else "clickhouse-configured";
+      paths = [ clickhouseBase configDir ];
 
-      meta = pkgs.clickhouse.meta // {
-        description = "ClickHouse with custom configuration for OTel logs storage";
+      meta = clickhouseBase.meta // {
+        description = "ClickHouse with custom configuration for OTel logs storage"
+          + (if useMinimal then " (minimal build)" else "");
       };
     };
 
@@ -137,6 +146,12 @@ in
 
   # Allow custom configurations
   inherit mkClickhouse defaultConfig;
+
+  # Expose whether minimal build is being used
+  inherit useMinimal;
+
+  # Expose the base package (without config) for reference
+  basePackage = clickhouseBase;
 
   # Re-export ports for convenience
   inherit (ports.services) clickhouseHttp clickhouseNative clickhouseInterserver;
