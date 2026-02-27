@@ -58,6 +58,13 @@
             clickhouse = clickhouseMinimal;
           };
 
+          # Docker Compose generator (for running without MicroVM)
+          compose = import ./nix/docker-compose.nix {
+            lib = pkgs.lib;
+            inherit pkgs;
+            inherit (pkgs) writeText;
+          };
+
           # Verification scripts (modular)
           verify = pkgs.callPackage ./nix/verify { };
 
@@ -110,7 +117,7 @@
               program = toString (pkgs.writeShellScript "test" ''
                 set -e
                 cd ${self}
-                ${pkgs.go}/bin/go test -v ./...
+                ${pkgs.go_1_26}/bin/go test -v ./...
               '');
             };
 
@@ -119,7 +126,7 @@
               program = toString (pkgs.writeShellScript "test-race" ''
                 set -e
                 cd ${self}
-                CGO_ENABLED=1 ${pkgs.go}/bin/go test -race -v ./...
+                CGO_ENABLED=1 ${pkgs.go_1_26}/bin/go test -race -v ./...
               '');
             };
 
@@ -127,12 +134,66 @@
               type = "app";
               program = "${containers.loadScript}";
             };
+
+            # Docker Compose apps (run stack without MicroVM)
+            compose-up = {
+              type = "app";
+              program = "${compose.composeUp}/bin/compose-up";
+            };
+
+            compose-down = {
+              type = "app";
+              program = "${compose.composeDown}/bin/compose-down";
+            };
+
+            compose-logs = {
+              type = "app";
+              program = "${compose.composeLogs}/bin/compose-logs";
+            };
+
+            compose-ps = {
+              type = "app";
+              program = "${compose.composePs}/bin/compose-ps";
+            };
+
+            compose-setup = {
+              type = "app";
+              program = "${compose.composeSetup}/bin/compose-setup";
+            };
+
+            # Convenience scripts for VM management (using writeShellApplication for shellcheck)
+            stop-vm = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "stop-vm";
+                runtimeInputs = [ pkgs.procps ];
+                text = ''
+                  echo "Stopping any running MicroVMs..."
+                  pkill -9 -f "qemu.*otel-demo" && echo "VMs stopped" || echo "No VMs running"
+                '';
+              }}/bin/stop-vm";
+            };
+
+            clean-vm = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "clean-vm";
+                runtimeInputs = [ pkgs.procps pkgs.coreutils ];
+                text = ''
+                  echo "Cleaning up MicroVM state..."
+                  pkill -9 -f "qemu.*otel-demo" || true
+                  rm -f var.img control.sock
+                  echo "Cleaned: var.img and control.sock removed"
+                  echo "Run 'nix run .#microvm' to start fresh"
+                '';
+              }}/bin/clean-vm";
+            };
           } // verifyApps // (if system == "x86_64-linux" then
           # MicroVM runners (x86_64-linux only)
             pkgs.lib.genAttrs (microvmNames ++ [ "microvm" ])
               (name: {
                 type = "app";
-                program = toString self.nixosConfigurations.${name}.config.microvm.declaredRunner;
+                program = "${self.nixosConfigurations.${name}.config.microvm.declaredRunner}/bin/microvm-run";
               })
           else { });
 

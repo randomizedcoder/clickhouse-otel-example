@@ -87,6 +87,15 @@ let
         Listen        0.0.0.0
         Port          24224
 
+    # Parse the nested JSON from Docker's fluentd driver
+    # The log field contains JSON like: {"level":"info","ts":...,"random_number":42,...}
+    [FILTER]
+        Name          parser
+        Match         *
+        Key_Name      log
+        Parser        json
+        Reserve_Data  On
+
     [FILTER]
         Name          lua
         Match         *
@@ -102,6 +111,15 @@ let
         Format        json_lines
         Json_date_key Timestamp
         Json_date_format epoch
+  '';
+
+  # FluentBit parsers config
+  fluentbitParsers = writeText "parsers.conf" ''
+    [PARSER]
+        Name        json
+        Format      json
+        Time_Key    ts
+        Time_Format %s.%L
   '';
 
   # Generate docker-compose.yaml
@@ -160,6 +178,7 @@ let
           - "24224:24224"
         volumes:
           - ${fluentbitConf}:/fluent-bit/etc/fluent-bit.conf:ro
+          - ${fluentbitParsers}:/fluent-bit/etc/parsers.conf:ro
           - ${luaTransform}:/fluent-bit/etc/transform.lua:ro
         depends_on:
           clickhouse:
@@ -245,7 +264,7 @@ let
 
   # ClickHouse init SQL
   clickhouseInit = writeText "init.sql" ''
-    -- HyperDX compatible OTel logs schema
+    -- HyperDX compatible OTel logs schema with custom loggen fields
     CREATE TABLE IF NOT EXISTS default.otel_logs (
         Timestamp DateTime64(9) CODEC(Delta(8), ZSTD(1)),
         TimestampTime DateTime DEFAULT toDateTime(Timestamp),
@@ -263,8 +282,13 @@ let
         ScopeVersion LowCardinality(String) CODEC(ZSTD(1)),
         ScopeAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
         LogAttributes Map(LowCardinality(String), String) CODEC(ZSTD(1)),
+        -- Custom fields from loggen for dashboards
+        RandomNumber UInt32 DEFAULT 0,
+        RandomString LowCardinality(String) CODEC(ZSTD(1)),
+        Count UInt64 DEFAULT 0,
         INDEX idx_trace_id TraceId TYPE bloom_filter(0.001) GRANULARITY 1,
-        INDEX idx_lower_body lower(Body) TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 8
+        INDEX idx_lower_body lower(Body) TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 8,
+        INDEX idx_random_string RandomString TYPE set(100) GRANULARITY 4
     )
     ENGINE = MergeTree
     PARTITION BY toDate(TimestampTime)
@@ -327,7 +351,277 @@ let
     '';
   };
 
+  # Dashboard JSON for loggen metrics
+  dashboardJson = pkgs.writeText "loggen-dashboard.json" (builtins.toJSON {
+    name = "Loggen Metrics";
+    tiles = [
+      {
+        name = "RandomString Distribution";
+        x = 0;
+        y = 0;
+        w = 12;
+        h = 4;
+        series = [{
+          type = "table";
+          aggFn = "count";
+          where = "";
+          whereLanguage = "lucene";
+          groupBy = [ "RandomString" ];
+          sortOrder = "desc";
+        }];
+      }
+      {
+        name = "RandomNumber Over Time";
+        x = 12;
+        y = 0;
+        w = 12;
+        h = 4;
+        series = [{
+          type = "time";
+          aggFn = "avg";
+          field = "RandomNumber";
+          where = "RandomNumber:>0";
+          whereLanguage = "lucene";
+          groupBy = [];
+          displayType = "line";
+        }];
+      }
+      {
+        name = "RandomNumber by RandomString";
+        x = 0;
+        y = 4;
+        w = 12;
+        h = 4;
+        series = [{
+          type = "table";
+          aggFn = "avg";
+          field = "RandomNumber";
+          where = "";
+          whereLanguage = "lucene";
+          groupBy = [ "RandomString" ];
+          sortOrder = "desc";
+        }];
+      }
+      {
+        name = "Log Count Over Time";
+        x = 12;
+        y = 4;
+        w = 12;
+        h = 4;
+        series = [{
+          type = "time";
+          aggFn = "count";
+          where = "";
+          whereLanguage = "lucene";
+          groupBy = [];
+          displayType = "line";
+        }];
+      }
+    ];
+    tags = [ "loggen" "demo" ];
+  });
+
+  # JavaScript for MongoDB setup - using double quotes to avoid Nix escaping issues
+  setupJs = writeText "setup-hyperdx.js" ''
+    // Setup script for HyperDX - creates connection, source, and dashboard
+    // Run with: mongosh mongodb://localhost:37017/hyperdx setup-hyperdx.js
+
+    // IS_LOCAL_APP_MODE uses this ObjectId (hex encoding of "_local_team_")
+    const LOCAL_TEAM_ID = ObjectId("5f6c6f63616c5f7465616d5f");
+
+    // Create team if not exists (IS_LOCAL_APP_MODE expects this ID)
+    if (db.teams.countDocuments({_id: LOCAL_TEAM_ID}) === 0) {
+      print("Creating local team...");
+      db.teams.insertOne({
+        _id: LOCAL_TEAM_ID,
+        name: "Local Team",
+        allowedAuthMethods: ["local"],
+        hookId: "local-hook-id",
+        apiKey: "local-api-key",
+        collectorAuthenticationEnforced: false,
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+    }
+
+    const TEAM_ID = LOCAL_TEAM_ID;
+    print("Team ID: " + TEAM_ID);
+
+    // Create connection if not exists
+    if (db.connections.countDocuments({name: "Default"}) === 0) {
+      print("Creating ClickHouse connection...");
+      db.connections.insertOne({
+        team: TEAM_ID,
+        name: "Default",
+        host: "http://clickhouse:8123",
+        username: "default",
+        password: "",
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+    } else {
+      print("Connection already exists");
+    }
+
+    const CONN_ID = db.connections.findOne({name: "Default"})._id;
+    print("Connection ID: " + CONN_ID);
+
+    // Create source if not exists
+    if (db.sources.countDocuments({name: "OTel Logs"}) === 0) {
+      print("Creating OTel Logs source...");
+      db.sources.insertOne({
+        team: TEAM_ID,
+        connection: CONN_ID,
+        name: "OTel Logs",
+        kind: "log",
+        from: { databaseName: "default", tableName: "otel_logs" },
+        timestampValueExpression: "TimestampTime",
+        displayedTimestampValueExpression: "Timestamp",
+        bodyExpression: "Body",
+        severityTextExpression: "SeverityText",
+        serviceNameExpression: "ServiceName",
+        traceIdExpression: "TraceId",
+        spanIdExpression: "SpanId",
+        highlightedTraceAttributeExpressions: [],
+        highlightedRowAttributeExpressions: [],
+        materializedViews: [],
+        querySettings: [],
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+    } else {
+      print("Source already exists");
+    }
+
+    const SOURCE_ID = db.sources.findOne({name: "OTel Logs"})._id;
+    print("Source ID: " + SOURCE_ID);
+
+    // Create dashboard if not exists
+    if (db.dashboards.countDocuments({name: "Loggen Metrics"}) === 0) {
+      print("Creating Loggen Metrics dashboard...");
+      db.dashboards.insertOne({
+        team: TEAM_ID,
+        name: "Loggen Metrics",
+        tiles: [
+          {
+            id: new ObjectId().toString(),
+            name: "RandomString Distribution",
+            x: 0, y: 0, w: 12, h: 4,
+            config: {
+              source: SOURCE_ID.toString(),
+              displayType: "table",
+              select: [
+                { aggFn: "count", alias: "Count" }
+              ],
+              from: { databaseName: "default", tableName: "otel_logs" },
+              where: "",
+              whereLanguage: "lucene",
+              groupBy: [{ valueExpression: "RandomString" }],
+              orderBy: [{ valueExpression: "Count", ordering: "DESC" }]
+            }
+          },
+          {
+            id: new ObjectId().toString(),
+            name: "RandomNumber Over Time",
+            x: 12, y: 0, w: 12, h: 4,
+            config: {
+              source: SOURCE_ID.toString(),
+              displayType: "line",
+              select: [
+                { aggFn: "avg", valueExpression: "RandomNumber", alias: "Avg RandomNumber" }
+              ],
+              from: { databaseName: "default", tableName: "otel_logs" },
+              where: "RandomNumber:>0",
+              whereLanguage: "lucene",
+              groupBy: [],
+              granularity: "auto"
+            }
+          },
+          {
+            id: new ObjectId().toString(),
+            name: "Avg RandomNumber by String",
+            x: 0, y: 4, w: 12, h: 4,
+            config: {
+              source: SOURCE_ID.toString(),
+              displayType: "table",
+              select: [
+                { aggFn: "avg", valueExpression: "RandomNumber", alias: "Avg" }
+              ],
+              from: { databaseName: "default", tableName: "otel_logs" },
+              where: "",
+              whereLanguage: "lucene",
+              groupBy: [{ valueExpression: "RandomString" }],
+              orderBy: [{ valueExpression: "Avg", ordering: "DESC" }]
+            }
+          },
+          {
+            id: new ObjectId().toString(),
+            name: "Log Count Over Time",
+            x: 12, y: 4, w: 12, h: 4,
+            config: {
+              source: SOURCE_ID.toString(),
+              displayType: "line",
+              select: [
+                { aggFn: "count", alias: "Count" }
+              ],
+              from: { databaseName: "default", tableName: "otel_logs" },
+              where: "",
+              whereLanguage: "lucene",
+              groupBy: [],
+              granularity: "auto"
+            }
+          }
+        ],
+        tags: ["loggen", "demo"],
+        filters: [],
+        createdAt: new Date(),
+        updatedAt: new Date()
+      });
+    } else {
+      print("Dashboard already exists");
+    }
+
+    print("");
+    print("Setup complete!");
+  '';
+
+  # Script to setup HyperDX with connection, source, and dashboard
+  composeSetup = pkgs.writeShellApplication {
+    name = "compose-setup";
+    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.mongosh ];
+    text = ''
+      set -euo pipefail
+
+      API_URL="http://localhost:${toString ports.compose.hyperdxApi}"
+      MONGO_URI="mongodb://localhost:${toString ports.compose.mongodb}/hyperdx"
+
+      echo "Setting up HyperDX..."
+
+      # Wait for HyperDX API to be ready
+      echo "Waiting for HyperDX API..."
+      for i in {1..30}; do
+        if curl -s "$API_URL/health" | jq -e '.data == "OK"' > /dev/null 2>&1; then
+          echo "HyperDX API is ready"
+          break
+        fi
+        echo "  Waiting... ($i/30)"
+        sleep 2
+      done
+
+      # Run MongoDB setup script (creates team, connection, source, dashboard)
+      echo ""
+      mongosh "$MONGO_URI" --quiet ${setupJs}
+
+      echo ""
+      echo "  - Connection: Default (http://clickhouse:8123)"
+      echo "  - Source: OTel Logs (default.otel_logs)"
+      echo "  - Dashboard: Loggen Metrics"
+      echo ""
+      echo "Open HyperDX: http://localhost:${toString ports.compose.hyperdxApp}"
+    '';
+  };
+
 in
 {
-  inherit composeFile composeUp composeDown composeLogs composePs;
+  inherit composeFile composeUp composeDown composeLogs composePs composeSetup dashboardJson;
 }

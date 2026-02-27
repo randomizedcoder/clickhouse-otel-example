@@ -176,7 +176,28 @@ nix run .#compose-down
 
 ### First-Time Setup
 
-HyperDX runs in local app mode (no login required). After starting the stack:
+HyperDX runs in local app mode (no login required). After starting the stack, run the setup script to configure the connection, source, and demo dashboard:
+
+```bash
+# Automated setup (creates connection, source, and dashboard)
+nix run .#compose-setup
+```
+
+This creates:
+- **Connection:** Default (http://clickhouse:8123)
+- **Source:** OTel Logs (default.otel_logs table)
+- **Dashboard:** Loggen Metrics with 4 charts:
+  - RandomString Distribution (table)
+  - RandomNumber Over Time (line chart)
+  - Avg RandomNumber by String (table)
+  - Log Count Over Time (line chart)
+
+Then open http://localhost:38080 and navigate to **Dashboards** → **Loggen Metrics**.
+
+<details>
+<summary>Manual Setup (alternative)</summary>
+
+If you prefer to configure manually:
 
 1. Open http://localhost:38080
 2. Go to **Team Settings** → **Connections** → **Add Connection**:
@@ -194,6 +215,8 @@ HyperDX runs in local app mode (no login required). After starting the stack:
    - **Severity:** `SeverityText`
    - **Service Name:** `ServiceName`
 4. Navigate to **Search** to view logs
+
+</details>
 
 ### Verify Data Flow
 
