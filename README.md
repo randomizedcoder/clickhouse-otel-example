@@ -1,6 +1,6 @@
 # ClickHouse OpenTelemetry Pipeline Demo
 
-**Last Updated:** 2026-02-25
+**Last Updated:** 2026-02-27
 
 A complete demonstration of an OpenTelemetry logs pipeline using Nix for reproducible builds. The pipeline collects JSON logs from a Go application, transforms them to OTel format via FluentBit, stores them in ClickHouse, and visualizes them with HyperDX.
 
@@ -20,6 +20,7 @@ A complete demonstration of an OpenTelemetry logs pipeline using Nix for reprodu
 - [What's Built](#whats-built)
 - [Demo Credentials](#demo-credentials)
 - [Quick Start](#quick-start)
+- [Docker Compose (Local Development)](#docker-compose-local-development)
 - [Configuration](#configuration)
 - [Kubernetes Deployment](#kubernetes-deployment)
 - [Pipeline Verification](#pipeline-verification)
@@ -76,12 +77,15 @@ kubectl apply -k k8s/
 
 ### FluentBit
 - DaemonSet deployment for Kubernetes log collection
-- Lua script transforms JSON to OpenTelemetry format
-- Outputs to ClickHouse HTTP interface
+- Kubernetes filter enriches logs with pod metadata (labels, node name)
+- Lua script transforms JSON to OpenTelemetry format with dynamic service names
+- Outputs to ClickHouse HTTP interface with async inserts and gzip compression
+- 2-second flush interval for batch efficiency
 
 ### ClickHouse
-- HyperDX-compatible `otel_logs` table schema
-- Materialized views for efficient querying
+- HyperDX-compatible `otel_logs` table schema with ObservedTimestamp
+- MATERIALIZED columns for efficient K8s metadata queries (ContainerName, PodName, NamespaceName, NodeName)
+- Bloom filter and set indexes for fast filtering
 - Persistent storage via StatefulSet
 
 ### HyperDX
@@ -140,6 +144,85 @@ nix run .#loggen -- --max-number 50 --num-strings 5 --sleep-duration 2s
 LOGGEN_MAX_NUMBER=50 LOGGEN_NUM_STRINGS=5 nix run .#loggen
 ```
 
+## Docker Compose (Local Development)
+
+For faster iteration without a MicroVM, use Docker Compose directly on your host. Nix generates the `docker-compose.yaml` with configuration from `nix/ports.nix`.
+
+### Quick Start
+
+```bash
+# Start the stack
+nix run .#compose-up
+
+# View logs
+nix run .#compose-logs
+
+# Check status
+nix run .#compose-ps
+
+# Stop the stack
+nix run .#compose-down
+```
+
+### Access Points
+
+| Service | URL |
+|---------|-----|
+| **HyperDX UI** | http://localhost:38080 |
+| **HyperDX API** | http://localhost:38000 |
+| **ClickHouse HTTP** | http://localhost:38123 |
+| **ClickHouse Native** | localhost:39000 |
+| **MongoDB** | localhost:37017 |
+
+### First-Time Setup
+
+HyperDX runs in local app mode (no login required). After starting the stack:
+
+1. Open http://localhost:38080
+2. Go to **Team Settings** → **Connections** → **Add Connection**:
+   - **Name:** `Default`
+   - **Host:** `http://clickhouse:8123`
+   - **Username:** `default`
+   - **Password:** (leave empty)
+3. Go to **Team Settings** → **Sources** → **Add Source**:
+   - **Name:** `OTel Logs`
+   - **Connection:** `Default`
+   - **Database:** `default`
+   - **Table:** `otel_logs`
+   - **Timestamp:** `TimestampTime`
+   - **Body:** `Body`
+   - **Severity:** `SeverityText`
+   - **Service Name:** `ServiceName`
+4. Navigate to **Search** to view logs
+
+### Verify Data Flow
+
+```bash
+# Check logs in ClickHouse
+curl 'http://localhost:38123/?query=SELECT%20count()%20FROM%20otel_logs'
+
+# View recent logs
+curl 'http://localhost:38123/?query=SELECT%20*%20FROM%20otel_logs%20ORDER%20BY%20Timestamp%20DESC%20LIMIT%205%20FORMAT%20Pretty'
+```
+
+### Architecture
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Loggen    │────▶│  FluentBit  │────▶│ ClickHouse  │◀────│   HyperDX   │
+│ (container) │     │ (fluentd    │     │ (container) │     │ (container) │
+│             │     │  driver)    │     │             │     │             │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+     JSON logs      Transform to OTel    Store logs         Query & visualize
+```
+
+### Notes
+
+- Uses official Docker images (ClickHouse, MongoDB, HyperDX) plus Nix-built loggen
+- Ports use `3XXXX` prefix to avoid conflicts with local services
+- Data persists in Docker volumes (`store_clickhouse-data`, `store_mongodb-data`)
+- FluentBit transforms logs via Lua script to OTel format
+
 ## Configuration
 
 ### Loggen Environment Variables
@@ -176,6 +259,15 @@ All ports are centralized in `nix/ports.nix`:
 | MongoDB | 27017 |
 | HyperDX API | 28000 |
 | HyperDX App | 28080 |
+
+**Docker Compose External Ports:**
+| Service | Port |
+|---------|------|
+| HyperDX App | 38080 |
+| HyperDX API | 38000 |
+| ClickHouse HTTP | 38123 |
+| ClickHouse Native | 39000 |
+| MongoDB | 37017 |
 
 ## Project Structure
 
@@ -220,6 +312,7 @@ clickhouse-otel-example/
 │   ├── fluentbit.nix           # FluentBit with custom config
 │   ├── hyperdx.nix             # HyperDX built from source
 │   ├── containers.nix          # OCI image definitions (uses lib/containers.nix)
+│   ├── docker-compose.nix      # Docker Compose generator
 │   ├── ports.nix               # Centralized port configuration
 │   └── devshell.nix            # Development environment
 ├── flake.nix                   # Nix flake
@@ -415,10 +508,20 @@ HyperDX is built from source using:
 - **tsconfig-paths/register** at runtime to resolve TypeScript path aliases (`@/*` → `build/src/*`)
 
 ### FluentBit Configuration
-FluentBit uses a Lua script (`nix/lua/transform.lua`) to transform JSON logs to OpenTelemetry format before sending to ClickHouse.
+FluentBit uses a Lua script (`nix/lua/transform.lua`) to transform JSON logs to OpenTelemetry format before sending to ClickHouse. Key features:
+- Kubernetes filter for pod metadata enrichment (labels, node name)
+- 2-second flush interval for batch efficiency
+- Async inserts (`async_insert=1`) for better ClickHouse throughput
+- Gzip compression for reduced network bandwidth
+- Dynamic service name extraction from K8s labels (`app`, `app.kubernetes.io/name`, `k8s-app`)
+- ObservedTimestamp tracking for pipeline latency measurement
 
 ### ClickHouse Schema
-The `otel_logs` table is compatible with HyperDX's expected schema, including proper timestamp handling and JSON body storage.
+The `otel_logs` table is compatible with HyperDX's expected schema, including proper timestamp handling and JSON body storage. Key features:
+- `ObservedTimestamp` column for pipeline latency measurement
+- MATERIALIZED columns: `ContainerName`, `PodName`, `NamespaceName`, `NodeName` (auto-extracted from ResourceAttributes)
+- Bloom filter indexes: `idx_trace_id`, `idx_container`, `idx_body`
+- Set indexes: `idx_severity`, `idx_service`, `idx_namespace`, `idx_random_string`
 
 ### ClickHouse Size Optimization
 
@@ -502,7 +605,7 @@ Measure end-to-end pipeline latency from log emission to ClickHouse availability
 | `nix run .#measure-latency` | Passive: analyze age of recent logs |
 | `nix run .#measure-latency-active` | Active: wait for new logs and measure |
 
-**Expected latency: 6-11 seconds** (FluentBit refresh: 5s, flush: 1s)
+**Expected latency: 6-12 seconds** (FluentBit refresh: 5s, flush: 2s)
 
 ### Sample Output
 
@@ -527,7 +630,7 @@ The latency includes:
 1. Container runtime writing log to file
 2. FluentBit tail refresh interval (configured: 5s)
 3. FluentBit processing (Lua transformation)
-4. FluentBit flush interval (configured: 1s)
+4. FluentBit flush interval (configured: 2s)
 5. Network transfer to ClickHouse
 6. ClickHouse write and indexing
 

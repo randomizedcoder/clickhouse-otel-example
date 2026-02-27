@@ -85,7 +85,8 @@ let
         "HYPERDX_APP_PORT=${toString ports.services.hyperdxApp}"
         "CLICKHOUSE_HOST=clickhouse"
         "CLICKHOUSE_PORT=${toString ports.services.clickhouseHttp}"
-        "HYPERDX_AUTH_DISABLED=true"
+        # Enable local app mode (no auth required)
+        "IS_LOCAL_APP_MODE=DANGEROUSLY_is_local_app_mode💀"
       ];
       exposedPorts = [ ports.services.hyperdxApi ports.services.hyperdxApp ];
       description = "HyperDX observability platform";
@@ -93,6 +94,7 @@ let
     };
 
     # ClickHouse uses nix/clickhouse.nix module for configuration
+    # includeShell is needed for K8s init script that creates tables on startup
     clickhouse = {
       packages = [ clickhouse ];
       pathsToLink = [ "/bin" "/etc" "/share" "/opt" ];
@@ -103,6 +105,7 @@ let
       exposedPorts = [ ports.services.clickhouseHttp ports.services.clickhouseNative ports.services.clickhouseInterserver ];
       volumes = [ "/var/lib/clickhouse" ];
       description = "ClickHouse for OTel logs storage";
+      includeShell = true;
     };
   };
 

@@ -11,6 +11,11 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, microvm }:
+    let
+      # MicroVM variants - defined once, used everywhere
+      microvmVariants = [ "docker" "k3s" "minikube" ];
+      microvmNames = map (v: "microvm-${v}") microvmVariants;
+    in
     flake-utils.lib.eachDefaultSystem
       (system:
         let
@@ -56,42 +61,8 @@
           # Verification scripts (modular)
           verify = pkgs.callPackage ./nix/verify { };
 
-          # Import app helpers
-          appsLib = import ./nix/lib/apps.nix { inherit (pkgs) lib; };
-
-          # All verify script names for genAttrs
-          verifyScriptNames = [
-            # Positive verification
-            "verify-loggen"
-            "verify-fluentbit"
-            "verify-fluentbit-output"
-            "verify-clickhouse"
-            "verify-hyperdx"
-            "verify-pipeline"
-            # Initialization
-            "init-clickhouse"
-            # Break scripts
-            "break-loggen"
-            "break-fluentbit"
-            "break-fluentbit-lua"
-            "break-fluentbit-output"
-            "break-clickhouse"
-            "break-clickhouse-table"
-            "break-hyperdx"
-            # Fix scripts
-            "fix-loggen"
-            "fix-fluentbit"
-            "fix-fluentbit-lua"
-            "fix-fluentbit-output"
-            "fix-clickhouse"
-            "fix-clickhouse-table"
-            "fix-hyperdx"
-            # Latency measurement
-            "measure-latency"
-            "measure-latency-active"
-            # Test harness
-            "test-verify-scripts"
-          ];
+          # Auto-discover verify script names
+          verifyScriptNames = verify._scriptNames;
 
           # Generate verify apps using genAttrs
           verifyApps = pkgs.lib.genAttrs verifyScriptNames (name: {
@@ -103,17 +74,9 @@
         {
           # Packages
           packages = {
-            # Go application binary
             loggen = goApp;
-
-            # FluentBit binary
             fluentbit = fluentbit;
-
-            # ClickHouse minimal build (smaller binary for OTEL pipeline)
-            # See docs/CLICKHOUSE_SIZE_OPTIMIZATION.md
             clickhouse-minimal = clickhouseMinimal;
-
-            # HyperDX
             hyperdx = hyperdx;
 
             # OCI container images
@@ -124,23 +87,19 @@
             mongodb-image = containers.mongodbImage;
             ferretdb-image = containers.ferretdbImage;
             hyperdx-image = containers.hyperdxImage;
-
-            # All images bundled
             all-images = containers.allImages;
 
-            # Default package
             default = goApp;
           };
 
-          # Development shell
-          devShells.default = pkgs.callPackage ./nix/devshell.nix { };
+          devShells.default = pkgs.callPackage ./nix/devshell.nix {
+            inherit verifyScriptNames;
+          };
 
-          # Formatter for `nix fmt`
           formatter = pkgs.nixpkgs-fmt;
 
           # Apps for running
           apps = {
-            # Core apps
             loggen = {
               type = "app";
               program = "${goApp}/bin/loggen";
@@ -168,136 +127,38 @@
               type = "app";
               program = "${containers.loadScript}";
             };
-          } // verifyApps // (if system == "x86_64-linux" then {
-            # MicroVM runners (x86_64-linux only)
-            microvm-docker = {
-              type = "app";
-              program = toString (
-                self.nixosConfigurations.microvm-docker.config.microvm.declaredRunner
-              );
-            };
-            microvm-k3s = {
-              type = "app";
-              program = toString (
-                self.nixosConfigurations.microvm-k3s.config.microvm.declaredRunner
-              );
-            };
-            microvm-minikube = {
-              type = "app";
-              program = toString (
-                self.nixosConfigurations.microvm-minikube.config.microvm.declaredRunner
-              );
-            };
-            microvm = {
-              type = "app";
-              program = toString (
-                self.nixosConfigurations.microvm.config.microvm.declaredRunner
-              );
-            };
-          } else { });
+          } // verifyApps // (if system == "x86_64-linux" then
+          # MicroVM runners (x86_64-linux only)
+            pkgs.lib.genAttrs (microvmNames ++ [ "microvm" ])
+              (name: {
+                type = "app";
+                program = toString self.nixosConfigurations.${name}.config.microvm.declaredRunner;
+              })
+          else { });
 
-          # Checks for CI
-          checks = {
-            # Go tests
-            go-test = pkgs.runCommand "go-test"
-              {
-                nativeBuildInputs = [ pkgs.go ];
-                src = self;
-              } ''
-              export HOME=$TMPDIR
-              export GOCACHE=$TMPDIR/go-cache
-              cd $src
-              go test -v ./...
-              touch $out
-            '';
-
-            # Go lint
-            go-lint = pkgs.runCommand "go-lint"
-              {
-                nativeBuildInputs = [ pkgs.go pkgs.golangci-lint ];
-                src = self;
-              } ''
-              export HOME=$TMPDIR
-              export GOCACHE=$TMPDIR/go-cache
-              export GOLANGCI_LINT_CACHE=$TMPDIR/lint-cache
-              cd $src
-              golangci-lint run ./...
-              touch $out
-            '';
-
-            # Nix formatting
-            nix-fmt = pkgs.runCommand "nix-fmt"
-              {
-                nativeBuildInputs = [ pkgs.nixpkgs-fmt ];
-                src = self;
-              } ''
-              nixpkgs-fmt --check $src/*.nix $src/nix/*.nix $src/nix/lib/*.nix $src/nix/verify/*.nix
-              touch $out
-            '';
-          };
+          checks = import ./nix/checks.nix { inherit self pkgs; };
         }
       ) // {
       # NixOS configurations (system-independent)
-      # MicroVM variants: docker (lowest resources), k3s (recommended), minikube (most compatible)
-      nixosConfigurations = {
-        # Docker variant: Direct Docker Compose (4GB RAM, 2 vCPUs)
-        microvm-docker = nixpkgs.lib.nixosSystem {
-          system = "x86_64-linux";
-          modules = [
-            microvm.nixosModules.microvm
-            (import ./nix/microvm { variant = "docker"; })
-          ];
-          specialArgs = {
-            inherit self;
-            k8sManifestsPath = ./k8s;
+      nixosConfigurations =
+        let
+          mkMicroVM = variant: nixpkgs.lib.nixosSystem {
+            system = "x86_64-linux";
+            modules = [
+              microvm.nixosModules.microvm
+              (import ./nix/microvm { inherit variant; })
+            ];
+            specialArgs = {
+              inherit self;
+              k8sManifestsPath = ./k8s;
+            };
           };
-        };
+        in
+        nixpkgs.lib.genAttrs microvmNames
+          (name: mkMicroVM (nixpkgs.lib.removePrefix "microvm-" name))
+        // { microvm = mkMicroVM "minikube"; }; # Legacy alias
 
-        # K3s variant: Lightweight Kubernetes (6GB RAM, 3 vCPUs) - Recommended
-        microvm-k3s = nixpkgs.lib.nixosSystem {
-          system = "x86_64-linux";
-          modules = [
-            microvm.nixosModules.microvm
-            (import ./nix/microvm { variant = "k3s"; })
-          ];
-          specialArgs = {
-            inherit self;
-            k8sManifestsPath = ./k8s;
-          };
-        };
-
-        # Minikube variant: Full Minikube (8GB RAM, 4 vCPUs)
-        microvm-minikube = nixpkgs.lib.nixosSystem {
-          system = "x86_64-linux";
-          modules = [
-            microvm.nixosModules.microvm
-            (import ./nix/microvm { variant = "minikube"; })
-          ];
-          specialArgs = {
-            inherit self;
-            k8sManifestsPath = ./k8s;
-          };
-        };
-
-        # Legacy alias (points to minikube for backwards compatibility)
-        microvm = nixpkgs.lib.nixosSystem {
-          system = "x86_64-linux";
-          modules = [
-            microvm.nixosModules.microvm
-            (import ./nix/microvm { variant = "minikube"; })
-          ];
-          specialArgs = {
-            inherit self;
-            k8sManifestsPath = ./k8s;
-          };
-        };
-      };
-
-      # NixOS modules for testing framework
-      nixosModules = {
-        microvm-docker = import ./nix/microvm { variant = "docker"; };
-        microvm-k3s = import ./nix/microvm { variant = "k3s"; };
-        microvm-minikube = import ./nix/microvm { variant = "minikube"; };
-      };
+      nixosModules = nixpkgs.lib.genAttrs microvmNames
+        (name: import ./nix/microvm { variant = nixpkgs.lib.removePrefix "microvm-" name; });
     };
 }

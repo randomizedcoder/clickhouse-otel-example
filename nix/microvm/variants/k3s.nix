@@ -12,14 +12,21 @@
 
 { config, lib, pkgs, images, packages, k8sManifests, ... }:
 
+let
+  microvmLib = import ../../lib/microvm.nix { inherit lib pkgs; };
+  loadImagesScript = microvmLib.mkLoadImagesScript {
+    variant = "k3s";
+    inherit packages pkgs;
+  };
+in
 {
   # Enable K3s
   services.k3s = {
     enable = true;
     role = "server";
     extraFlags = toString [
-      "--disable=traefik"      # We don't need ingress for demo
-      "--disable=servicelb"    # Use NodePort instead
+      "--disable=traefik" # We don't need ingress for demo
+      "--disable=servicelb" # Use NodePort instead
     ];
   };
 
@@ -30,17 +37,10 @@
   ]);
 
   # Load container images into containerd
-  systemd.services.load-images = {
+  systemd.services.load-images = microvmLib.mkOneshotService {
     description = "Load OCI images into K3s containerd";
     after = [ "k3s.service" ];
     requires = [ "k3s.service" ];
-    wantedBy = [ "multi-user.target" ];
-
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      User = "root";
-    };
 
     script = ''
       set -e
@@ -52,21 +52,7 @@
       done
 
       echo "Loading container images into K3s containerd..."
-
-      echo "Loading loggen..."
-      ${pkgs.k3s}/bin/k3s ctr images import ${packages.loggen-image}
-
-      echo "Loading fluentbit..."
-      ${pkgs.k3s}/bin/k3s ctr images import ${packages.fluentbit-image}
-
-      echo "Loading clickhouse..."
-      ${pkgs.k3s}/bin/k3s ctr images import ${packages.clickhouse-image}
-
-      echo "Loading mongodb..."
-      ${pkgs.k3s}/bin/k3s ctr images import ${packages.mongodb-image}
-
-      echo "Loading hyperdx..."
-      ${pkgs.k3s}/bin/k3s ctr images import ${packages.hyperdx-image}
+      ${loadImagesScript}
 
       echo "All images loaded. Verifying..."
       ${pkgs.k3s}/bin/k3s ctr images ls
@@ -74,17 +60,10 @@
   };
 
   # Deploy Kubernetes manifests
-  systemd.services.deploy-manifests = {
+  systemd.services.deploy-manifests = microvmLib.mkOneshotService {
     description = "Deploy Kubernetes manifests";
     after = [ "load-images.service" ];
     requires = [ "load-images.service" ];
-    wantedBy = [ "multi-user.target" ];
-
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      User = "root";
-    };
 
     script = ''
       set -e

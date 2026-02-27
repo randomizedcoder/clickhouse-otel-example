@@ -1,5 +1,58 @@
-{ pkgs }:
+{ pkgs, verifyScriptNames ? [ ] }:
 
+let
+  # Categorize scripts by prefix
+  categorizeScripts = names:
+    let
+      byPrefix = prefix: builtins.filter (n: pkgs.lib.hasPrefix prefix n) names;
+    in
+    {
+      verify = byPrefix "verify-";
+      break = byPrefix "break-";
+      fix = byPrefix "fix-";
+      measure = byPrefix "measure-";
+      init = byPrefix "init-";
+      test = byPrefix "test-";
+    };
+
+  categories = categorizeScripts verifyScriptNames;
+
+  # Generate help text for a category
+  mkCategoryHelp = prefix: scripts:
+    if scripts == [ ] then ""
+    else pkgs.lib.concatMapStringsSep "\n" (s: "  nix run .#${s}") scripts;
+
+  # Dynamic help text based on discovered scripts
+  dynamicHelp =
+    let
+      verifyHelp = mkCategoryHelp "verify" categories.verify;
+      breakFixHelp =
+        if categories.break != [ ] then ''
+          Failure injection (for testing):
+          ${mkCategoryHelp "break" categories.break}
+          ${mkCategoryHelp "fix" categories.fix}
+          ${mkCategoryHelp "test" categories.test}
+        '' else "";
+      measureHelp =
+        if categories.measure != [ ] then ''
+          Latency measurement:
+          ${mkCategoryHelp "measure" categories.measure}
+        '' else "";
+      initHelp =
+        if categories.init != [ ] then ''
+          Initialization:
+          ${mkCategoryHelp "init" categories.init}
+        '' else "";
+    in
+    ''
+      Verify commands:
+      ${verifyHelp}
+
+      ${breakFixHelp}
+      ${measureHelp}
+      ${initHelp}
+    '';
+in
 pkgs.mkShell {
   name = "clickhouse-otel-dev";
 
@@ -69,23 +122,7 @@ pkgs.mkShell {
     echo "  go run ./cmd/loggen          - Run locally"
     echo "  watchexec -e go 'go test ./...' - Watch and test"
     echo ""
-    echo "Verify commands:"
-    echo "  nix run .#verify-loggen         - Check Go app emitting logs"
-    echo "  nix run .#verify-fluentbit      - Check FluentBit processing"
-    echo "  nix run .#verify-fluentbit-output - Check FluentBit -> ClickHouse"
-    echo "  nix run .#verify-clickhouse     - Check logs in ClickHouse"
-    echo "  nix run .#verify-hyperdx        - Check HyperDX operational"
-    echo "  nix run .#verify-pipeline       - Run all checks"
-    echo ""
-    echo "Failure injection (for testing):"
-    echo "  nix run .#break-<component>     - Inject failure"
-    echo "  nix run .#fix-<component>       - Restore component"
-    echo "  nix run .#test-verify-scripts   - Run full test suite"
-    echo ""
-    echo "Latency measurement:"
-    echo "  nix run .#measure-latency       - Passive: analyze age of recent logs"
-    echo "  nix run .#measure-latency-active - Active: wait for new logs and measure"
-    echo ""
+    ${dynamicHelp}
 
     # Set Go environment
     export GOPATH="$HOME/go"

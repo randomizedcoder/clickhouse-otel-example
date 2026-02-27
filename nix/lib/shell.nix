@@ -58,6 +58,89 @@ let
       local label="$1"
       kubectl -n ${namespace} get pods -l "$label" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null
     }
+
+    # Check if pod is ready (combines running + Ready condition)
+    # Usage: check_pod_ready "app=loggen" [timeout_seconds]
+    check_pod_ready() {
+      local label="$1"
+      local timeout="''${2:-60}"
+      local pod_name
+      pod_name=$(get_pod_name "$label")
+      if [ -z "$pod_name" ]; then
+        return 1
+      fi
+      local ready
+      ready=$(kubectl -n ${namespace} get pod "$pod_name" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
+      [ "$ready" = "True" ]
+    }
+
+    # Get pod condition value
+    # Usage: get_pod_condition "app=loggen" "Ready"
+    get_pod_condition() {
+      local label="$1"
+      local condition="$2"
+      local pod_name
+      pod_name=$(get_pod_name "$label")
+      kubectl -n ${namespace} get pod "$pod_name" -o jsonpath="{.status.conditions[?(@.type==\"$condition\")].status}" 2>/dev/null || echo ""
+    }
+
+    # Get container status field
+    # Usage: get_container_status "app=loggen" "ready" (or "restartCount")
+    get_container_status() {
+      local label="$1"
+      local field="$2"
+      local pod_name
+      pod_name=$(get_pod_name "$label")
+      kubectl -n ${namespace} get pod "$pod_name" -o jsonpath="{.status.containerStatuses[0].$field}" 2>/dev/null || echo ""
+    }
+  '';
+
+  # Test counter functions - reduces boilerplate in verify scripts
+  testCounterFunctions = ''
+    # Initialize test counters
+    init_test_counters() {
+      PASSED=0
+      FAILED=0
+    }
+
+    # Record a test result
+    # Usage: record_test "pass" or record_test "fail"
+    record_test() {
+      if [ "$1" = "pass" ]; then
+        PASSED=$((PASSED + 1))
+      else
+        FAILED=$((FAILED + 1))
+      fi
+    }
+
+    # Run a check and record result
+    # Usage: run_check "description" command_that_returns_0_on_success
+    run_check() {
+      local description="$1"
+      shift
+      if "$@"; then
+        print_pass "$description"
+        PASSED=$((PASSED + 1))
+        return 0
+      else
+        print_fail "$description"
+        FAILED=$((FAILED + 1))
+        return 1
+      fi
+    }
+
+    # Print test summary and exit with appropriate code
+    print_test_summary() {
+      local title="$1"
+      echo ""
+      print_header "$title"
+      echo "Passed: $PASSED"
+      echo "Failed: $FAILED"
+
+      if [ "$FAILED" -gt 0 ]; then
+        exit 1
+      fi
+    }
   '';
 
   # Helper to create a verification script with common boilerplate
@@ -67,6 +150,7 @@ let
       runtimeInputs = runtimeInputs;
       text = ''
         ${commonFunctions}
+        ${testCounterFunctions}
         ${text}
       '';
     };
@@ -80,7 +164,7 @@ let
         ${commonFunctions}
 
         print_header "Breaking ${description}"
-        print_info "${breakAction}"
+        print_info "Injecting failure..."
 
         ${breakAction}
 
@@ -99,7 +183,7 @@ let
         ${commonFunctions}
 
         print_header "Fixing ${description}"
-        print_info "${fixAction}"
+        print_info "Restoring..."
 
         ${fixAction}
 
@@ -114,6 +198,6 @@ let
 
 in
 {
-  inherit namespace colors commonFunctions;
+  inherit namespace colors commonFunctions testCounterFunctions;
   inherit mkVerifyScript mkBreakScript mkFixScript;
 }

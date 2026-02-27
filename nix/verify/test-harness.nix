@@ -1,7 +1,24 @@
 # Test harness for verification scripts
 { pkgs, shellLib }:
 let
-  inherit (shellLib) commonFunctions mkVerifyScript;
+  inherit (shellLib) mkVerifyScript;
+
+  # Define all test cases in one place - auto-calculates total
+  testCases = [
+    { name = "verify-loggen"; breakCmd = "break-loggen"; verifyCmd = "verify-loggen"; fixCmd = "fix-loggen"; }
+    { name = "verify-fluentbit"; breakCmd = "break-fluentbit"; verifyCmd = "verify-fluentbit"; fixCmd = "fix-fluentbit"; }
+    { name = "verify-fluentbit-output"; breakCmd = "break-fluentbit-output"; verifyCmd = "verify-fluentbit-output"; fixCmd = "fix-fluentbit-output"; }
+    { name = "verify-clickhouse"; breakCmd = "break-clickhouse"; verifyCmd = "verify-clickhouse"; fixCmd = "fix-clickhouse"; }
+    { name = "verify-clickhouse-table"; breakCmd = "break-clickhouse-table"; verifyCmd = "verify-clickhouse"; fixCmd = "fix-clickhouse-table"; }
+    { name = "verify-hyperdx"; breakCmd = "break-hyperdx"; verifyCmd = "verify-hyperdx"; fixCmd = "fix-hyperdx"; }
+  ];
+
+  totalTests = builtins.length testCases;
+
+  # Generate the test array for bash
+  testArrayEntries = builtins.concatStringsSep "\n" (
+    builtins.map (tc: ''TESTS+=("${tc.name}|${tc.breakCmd}|${tc.verifyCmd}|${tc.fixCmd}")'') testCases
+  );
 in
 {
   test-verify-scripts = mkVerifyScript {
@@ -11,14 +28,18 @@ in
 
       TESTS_PASSED=0
       TESTS_FAILED=0
-      TOTAL_TESTS=6
+      TOTAL_TESTS=${toString totalTests}
+
+      # Test definitions: name|break_cmd|verify_cmd|fix_cmd
+      declare -a TESTS
+      ${testArrayEntries}
 
       run_test() {
         local test_num="$1"
-        local name="$2"
-        local break_cmd="$3"
-        local verify_cmd="$4"
-        local fix_cmd="$5"
+        local test_def="$2"
+
+        # Parse test definition
+        IFS='|' read -r name break_cmd verify_cmd fix_cmd <<< "$test_def"
 
         echo ""
         echo -e "''${BLUE}[TEST $test_num/$TOTAL_TESTS] Testing $name failure detection''${NC}"
@@ -76,12 +97,11 @@ in
       echo ""
 
       # Run all tests
-      run_test 1 "verify-loggen" "break-loggen" "verify-loggen" "fix-loggen"
-      run_test 2 "verify-fluentbit" "break-fluentbit" "verify-fluentbit" "fix-fluentbit"
-      run_test 3 "verify-fluentbit-output" "break-fluentbit-output" "verify-fluentbit-output" "fix-fluentbit-output"
-      run_test 4 "verify-clickhouse" "break-clickhouse" "verify-clickhouse" "fix-clickhouse"
-      run_test 5 "verify-clickhouse-table" "break-clickhouse-table" "verify-clickhouse" "fix-clickhouse-table"
-      run_test 6 "verify-hyperdx" "break-hyperdx" "verify-hyperdx" "fix-hyperdx"
+      test_num=1
+      for test_def in "''${TESTS[@]}"; do
+        run_test "$test_num" "$test_def"
+        test_num=$((test_num + 1))
+      done
 
       # Summary
       print_header "Test Suite Summary"

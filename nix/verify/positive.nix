@@ -1,25 +1,23 @@
 # Positive verification scripts - verify each pipeline stage is working
 { pkgs, shellLib }:
 let
-  inherit (shellLib) namespace commonFunctions mkVerifyScript;
+  inherit (shellLib) namespace mkVerifyScript;
 in
 {
   verify-loggen = mkVerifyScript {
     name = "verify-loggen";
     text = ''
       print_header "Verifying Loggen (Go Log Generator)"
-
-      PASSED=0
-      FAILED=0
+      init_test_counters
 
       # Check 1: Pod is running
       print_info "Checking if loggen pod is running..."
       if check_pod_running "app=loggen"; then
         print_pass "Loggen pod is running"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "Loggen pod is not running"
-        FAILED=$((FAILED + 1))
+        record_test fail
         echo "  Run: kubectl -n ${namespace} get pods -l app=loggen"
         exit 1
       fi
@@ -28,24 +26,23 @@ in
 
       # Check 2: Health endpoint (via readiness/liveness probe status)
       print_info "Checking pod health conditions..."
-      POD_READY=$(kubectl -n ${namespace} get pod "$POD_NAME" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
-      if [ "$POD_READY" = "True" ]; then
+      if check_pod_ready "app=loggen"; then
         print_pass "Pod is healthy (Ready condition is True)"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
-        print_fail "Pod is not healthy (Ready: $POD_READY)"
-        FAILED=$((FAILED + 1))
+        print_fail "Pod is not healthy"
+        record_test fail
       fi
 
       # Check 3: Container ready
       print_info "Checking container status..."
-      CONTAINER_READY=$(kubectl -n ${namespace} get pod "$POD_NAME" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo "")
+      CONTAINER_READY=$(get_container_status "app=loggen" "ready")
       if [ "$CONTAINER_READY" = "true" ]; then
         print_pass "Container is ready"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "Container is not ready"
-        FAILED=$((FAILED + 1))
+        record_test fail
       fi
 
       # Check 4: Log output format (JSON with expected fields)
@@ -53,25 +50,17 @@ in
       LOG_LINE=$(kubectl -n ${namespace} logs "$POD_NAME" --tail=1 2>/dev/null || echo "")
       if echo "$LOG_LINE" | jq -e '.level and .ts and .msg and .count and .random_number and .random_string' >/dev/null 2>&1; then
         print_pass "Log output is valid JSON with expected fields"
-        PASSED=$((PASSED + 1))
+        record_test pass
         echo ""
         echo "  Sample log entry:"
         echo "$LOG_LINE" | jq -C '.'
       else
         print_fail "Log output format is invalid"
-        FAILED=$((FAILED + 1))
+        record_test fail
         echo "  Got: $LOG_LINE"
       fi
 
-      # Summary
-      echo ""
-      print_header "Loggen Verification Summary"
-      echo "Passed: $PASSED"
-      echo "Failed: $FAILED"
-
-      if [ "$FAILED" -gt 0 ]; then
-        exit 1
-      fi
+      print_test_summary "Loggen Verification Summary"
     '';
   };
 
@@ -79,9 +68,7 @@ in
     name = "verify-fluentbit";
     text = ''
       print_header "Verifying FluentBit (Log Collector)"
-
-      PASSED=0
-      FAILED=0
+      init_test_counters
 
       # Check 1: DaemonSet is ready
       print_info "Checking if FluentBit DaemonSet is ready..."
@@ -89,10 +76,10 @@ in
       READY=$(kubectl -n ${namespace} get daemonset fluentbit -o jsonpath='{.status.numberReady}' 2>/dev/null || echo "0")
       if [ "$DESIRED" -gt 0 ] && [ "$DESIRED" = "$READY" ]; then
         print_pass "FluentBit DaemonSet is ready ($READY/$DESIRED pods)"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "FluentBit DaemonSet is not ready ($READY/$DESIRED pods)"
-        FAILED=$((FAILED + 1))
+        record_test fail
         exit 1
       fi
 
@@ -100,36 +87,35 @@ in
 
       # Check 2: Pod readiness (indicates health endpoint is responding)
       print_info "Checking pod readiness..."
-      POD_READY=$(kubectl -n ${namespace} get pod "$POD_NAME" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
-      if [ "$POD_READY" = "True" ]; then
+      if check_pod_ready "app=fluentbit"; then
         print_pass "FluentBit pod is ready (health check passing)"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "FluentBit pod is not ready"
-        FAILED=$((FAILED + 1))
+        record_test fail
       fi
 
       # Check 3: Container running without restarts
       print_info "Checking container stability..."
-      RESTART_COUNT=$(kubectl -n ${namespace} get pod "$POD_NAME" -o jsonpath='{.status.containerStatuses[0].restartCount}' 2>/dev/null || echo "999")
+      RESTART_COUNT=$(get_container_status "app=fluentbit" "restartCount")
+      RESTART_COUNT=''${RESTART_COUNT:-999}
       if [ "$RESTART_COUNT" -lt 5 ]; then
         print_pass "Container is stable ($RESTART_COUNT restarts)"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_warn "Container has restarted $RESTART_COUNT times"
       fi
 
       # Check 4: No Lua errors in logs
       print_info "Checking for Lua script errors..."
-      LUA_ERRORS=0
       if kubectl -n ${namespace} logs "$POD_NAME" --tail=100 2>/dev/null | grep -qi "lua.*error\|lua.*exception\|lua.*failed"; then
         LUA_ERRORS=$(kubectl -n ${namespace} logs "$POD_NAME" --tail=100 2>/dev/null | grep -ci "lua.*error\|lua.*exception\|lua.*failed")
         print_fail "Found $LUA_ERRORS Lua errors in logs"
-        FAILED=$((FAILED + 1))
+        record_test fail
         kubectl -n ${namespace} logs "$POD_NAME" --tail=100 2>/dev/null | grep -i "lua.*error\|lua.*exception\|lua.*failed" || true
       else
         print_pass "No Lua script errors found"
-        PASSED=$((PASSED + 1))
+        record_test pass
       fi
 
       # Check 5: FluentBit is processing logs (check log output)
@@ -137,7 +123,7 @@ in
       FB_LOGS=$(kubectl -n ${namespace} logs "$POD_NAME" --tail=20 2>/dev/null || echo "")
       if echo "$FB_LOGS" | grep -q "input:tail"; then
         print_pass "FluentBit tail input is active"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_warn "Could not confirm FluentBit is tailing logs"
       fi
@@ -147,15 +133,7 @@ in
       print_info "Recent FluentBit activity:"
       kubectl -n ${namespace} logs "$POD_NAME" --tail=10 2>/dev/null | grep -v "^\\[0\\]" | head -5 || echo "  No recent logs"
 
-      # Summary
-      echo ""
-      print_header "FluentBit Verification Summary"
-      echo "Passed: $PASSED"
-      echo "Failed: $FAILED"
-
-      if [ "$FAILED" -gt 0 ]; then
-        exit 1
-      fi
+      print_test_summary "FluentBit Verification Summary"
     '';
   };
 
@@ -163,9 +141,7 @@ in
     name = "verify-fluentbit-output";
     text = ''
       print_header "Verifying FluentBit Output (ClickHouse Connection)"
-
-      PASSED=0
-      FAILED=0
+      init_test_counters
 
       FB_POD=$(get_pod_name "app=fluentbit")
 
@@ -176,17 +152,17 @@ in
 
       # Check 1: No HTTP errors in recent logs (indicates output is working)
       print_info "Checking for HTTP output errors..."
-      HTTP_ERRORS=0
       FB_LOGS=$(kubectl -n ${namespace} logs "$FB_POD" --tail=50 2>/dev/null || echo "")
+      HTTP_ERRORS=0
       if echo "$FB_LOGS" | grep -q "HTTP status=4\|HTTP status=5"; then
         HTTP_ERRORS=$(echo "$FB_LOGS" | grep -c "HTTP status=4\|HTTP status=5")
       fi
       if [ "$HTTP_ERRORS" -lt 5 ]; then
         print_pass "HTTP output errors are acceptable ($HTTP_ERRORS errors)"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "Too many HTTP output errors ($HTTP_ERRORS errors)"
-        FAILED=$((FAILED + 1))
+        record_test fail
       fi
 
       # Check 2: ClickHouse service exists and is reachable
@@ -194,10 +170,10 @@ in
       CH_SVC=$(kubectl -n ${namespace} get svc clickhouse -o jsonpath='{.spec.clusterIP}' 2>/dev/null || echo "")
       if [ -n "$CH_SVC" ]; then
         print_pass "ClickHouse service exists (IP: $CH_SVC)"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "ClickHouse service not found"
-        FAILED=$((FAILED + 1))
+        record_test fail
       fi
 
       # Check 3: No connection errors in recent logs
@@ -208,10 +184,10 @@ in
       fi
       if [ "$CONN_ERRORS" = "0" ]; then
         print_pass "No connection errors in recent logs"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "Found $CONN_ERRORS connection errors in recent logs"
-        FAILED=$((FAILED + 1))
+        record_test fail
       fi
 
       # Check 4: FluentBit output worker is active
@@ -219,7 +195,7 @@ in
       WORKER_LOGS=$(kubectl -n ${namespace} logs "$FB_POD" --tail=100 2>/dev/null || echo "")
       if echo "$WORKER_LOGS" | grep -q "output:http.*worker"; then
         print_pass "HTTP output worker is active"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_warn "Could not confirm HTTP output worker status"
       fi
@@ -229,15 +205,7 @@ in
       print_info "Recent FluentBit Output Activity:"
       kubectl -n ${namespace} logs "$FB_POD" --tail=20 2>/dev/null | grep -i "output\|http" | tail -5 || echo "  No recent output activity"
 
-      # Summary
-      echo ""
-      print_header "FluentBit Output Verification Summary"
-      echo "Passed: $PASSED"
-      echo "Failed: $FAILED"
-
-      if [ "$FAILED" -gt 0 ]; then
-        exit 1
-      fi
+      print_test_summary "FluentBit Output Verification Summary"
     '';
   };
 
@@ -245,18 +213,16 @@ in
     name = "verify-clickhouse";
     text = ''
       print_header "Verifying ClickHouse (Log Storage)"
-
-      PASSED=0
-      FAILED=0
+      init_test_counters
 
       # Check 1: Pod is running
       print_info "Checking if ClickHouse pod is running..."
       if check_pod_running "app=clickhouse"; then
         print_pass "ClickHouse pod is running"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "ClickHouse pod is not running"
-        FAILED=$((FAILED + 1))
+        record_test fail
         exit 1
       fi
 
@@ -267,10 +233,10 @@ in
       CH_PING=$(kubectl -n ${namespace} exec "$POD_NAME" -- clickhouse-client --query "SELECT 1" 2>/dev/null || echo "")
       if [ "$CH_PING" = "1" ]; then
         print_pass "ClickHouse server is responding"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "ClickHouse server not responding"
-        FAILED=$((FAILED + 1))
+        record_test fail
       fi
 
       # Check 3: otel_logs table exists
@@ -278,10 +244,10 @@ in
       TABLE_EXISTS=$(kubectl -n ${namespace} exec "$POD_NAME" -- clickhouse-client --query "EXISTS TABLE default.otel_logs" 2>/dev/null || echo "0")
       if [ "$TABLE_EXISTS" = "1" ]; then
         print_pass "otel_logs table exists"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "otel_logs table does not exist"
-        FAILED=$((FAILED + 1))
+        record_test fail
         exit 1
       fi
 
@@ -299,20 +265,31 @@ in
 
       if [ "$RECORD_COUNT" -gt 0 ]; then
         print_pass "Found $RECORD_COUNT records in otel_logs table"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_warn "No records found in otel_logs table yet"
       fi
 
-      # Check 5: Schema validation
-      print_info "Validating table schema..."
-      SCHEMA_VALID=$(kubectl -n ${namespace} exec "$POD_NAME" -- clickhouse-client --query "SELECT count() FROM system.columns WHERE table='otel_logs' AND name IN ('Timestamp','SeverityText','SeverityNumber','ServiceName','Body','RandomNumber','RandomString','Count')" 2>/dev/null || echo "0")
-      if [ "$SCHEMA_VALID" = "8" ]; then
-        print_pass "Table schema has all expected columns"
-        PASSED=$((PASSED + 1))
+      # Check 5: Schema validation (insertable columns)
+      print_info "Validating table schema (insertable columns)..."
+      SCHEMA_VALID=$(kubectl -n ${namespace} exec "$POD_NAME" -- clickhouse-client --query "SELECT count() FROM system.columns WHERE table='otel_logs' AND name IN ('Timestamp','ObservedTimestamp','SeverityText','SeverityNumber','ServiceName','Body','RandomNumber','RandomString','Count')" 2>/dev/null || echo "0")
+      if [ "$SCHEMA_VALID" = "9" ]; then
+        print_pass "Table schema has all expected insertable columns"
+        record_test pass
       else
-        print_fail "Table schema is missing columns (found $SCHEMA_VALID/8)"
-        FAILED=$((FAILED + 1))
+        print_fail "Table schema is missing insertable columns (found $SCHEMA_VALID/9)"
+        record_test fail
+      fi
+
+      # Check 6: MATERIALIZED columns for K8s metadata
+      print_info "Validating MATERIALIZED columns..."
+      MATERIALIZED_COLS=$(kubectl -n ${namespace} exec "$POD_NAME" -- clickhouse-client --query "SELECT count() FROM system.columns WHERE table='otel_logs' AND name IN ('ContainerName','PodName','NamespaceName','NodeName') AND default_kind='MATERIALIZED'" 2>/dev/null || echo "0")
+      if [ "$MATERIALIZED_COLS" = "4" ]; then
+        print_pass "Table has all MATERIALIZED K8s columns"
+        record_test pass
+      else
+        print_fail "Table is missing MATERIALIZED columns (found $MATERIALIZED_COLS/4)"
+        record_test fail
       fi
 
       # Show sample record
@@ -325,7 +302,6 @@ in
       print_info "Table Statistics:"
       kubectl -n ${namespace} exec "$POD_NAME" -- clickhouse-client --query "SELECT count() as total_records, min(Timestamp) as oldest, max(Timestamp) as newest FROM default.otel_logs" 2>/dev/null || echo "  Unable to fetch statistics"
 
-      # Summary
       echo ""
       print_header "ClickHouse Verification Summary"
       echo "Passed: $PASSED"
@@ -342,18 +318,16 @@ in
     name = "verify-hyperdx";
     text = ''
       print_header "Verifying HyperDX (Log Visualization)"
-
-      PASSED=0
-      FAILED=0
+      init_test_counters
 
       # Check 1: Pod is running
       print_info "Checking if HyperDX pod is running..."
       if check_pod_running "app=hyperdx"; then
         print_pass "HyperDX pod is running"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "HyperDX pod is not running"
-        FAILED=$((FAILED + 1))
+        record_test fail
         exit 1
       fi
 
@@ -361,34 +335,32 @@ in
 
       # Check 2: Pod is ready (liveness/readiness probes passing)
       print_info "Checking pod readiness..."
-      POD_READY=$(kubectl -n ${namespace} get pod "$POD_NAME" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
-      if [ "$POD_READY" = "True" ]; then
+      if check_pod_ready "app=hyperdx"; then
         print_pass "HyperDX pod is ready (health checks passing)"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "HyperDX pod is not ready"
-        FAILED=$((FAILED + 1))
+        record_test fail
       fi
 
       # Check 3: Container is ready
       print_info "Checking container status..."
-      CONTAINER_READY=$(kubectl -n ${namespace} get pod "$POD_NAME" -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo "")
+      CONTAINER_READY=$(get_container_status "app=hyperdx" "ready")
       if [ "$CONTAINER_READY" = "true" ]; then
         print_pass "HyperDX container is ready"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "HyperDX container is not ready"
-        FAILED=$((FAILED + 1))
+        record_test fail
       fi
 
       # Check 4: MongoDB connectivity (for session storage)
       print_info "Checking MongoDB connectivity..."
       MONGO_POD=$(get_pod_name "app=mongodb")
       if [ -n "$MONGO_POD" ]; then
-        MONGO_READY=$(kubectl -n ${namespace} get pod "$MONGO_POD" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || echo "")
-        if [ "$MONGO_READY" = "True" ]; then
+        if check_pod_ready "app=mongodb"; then
           print_pass "MongoDB pod is ready"
-          PASSED=$((PASSED + 1))
+          record_test pass
         else
           print_warn "MongoDB pod exists but not ready"
         fi
@@ -401,10 +373,10 @@ in
       SVC_ENDPOINTS=$(kubectl -n ${namespace} get endpoints hyperdx -o jsonpath='{.subsets[0].addresses[0].ip}' 2>/dev/null || echo "")
       if [ -n "$SVC_ENDPOINTS" ]; then
         print_pass "HyperDX service has endpoints ($SVC_ENDPOINTS)"
-        PASSED=$((PASSED + 1))
+        record_test pass
       else
         print_fail "HyperDX service has no endpoints"
-        FAILED=$((FAILED + 1))
+        record_test fail
       fi
 
       # Show access URLs
@@ -419,15 +391,7 @@ in
       echo "    API: http://localhost:8000"
       echo "    UI:  http://localhost:8080"
 
-      # Summary
-      echo ""
-      print_header "HyperDX Verification Summary"
-      echo "Passed: $PASSED"
-      echo "Failed: $FAILED"
-
-      if [ "$FAILED" -gt 0 ]; then
-        exit 1
-      fi
+      print_test_summary "HyperDX Verification Summary"
     '';
   };
 
