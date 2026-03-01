@@ -1,0 +1,125 @@
+# .golangci.yml
+#
+# Tier 1: Standard Lint (~2 minutes)
+# Used for: Every PR (CI gating)
+#
+# This is the default profile that balances thoroughness with speed.
+# It includes all Tier 0 checks plus security scanning and style checks.
+
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: vendor
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+linters:
+  default: none
+  enable:
+    # Tier 0 (always)
+    - govet
+    - errcheck
+    - ineffassign
+    - unused
+    - staticcheck
+    # Tier 1 (CI)
+    - gosec
+    - gocritic
+    - revive
+    - noctx
+    - contextcheck
+    - durationcheck
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: false  # Allow _, _ = pattern for intentional ignores
+      exclude-functions:
+        - (io.Closer).Close
+        - (*os.File).Close
+        - (*go.uber.org/zap.Logger).Sync
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment  # Struct optimization suggestions - not errors
+      settings:
+        shadow:
+          strict: true
+
+    staticcheck:
+      checks:
+        - "all"
+        - "-SA1019"  # Deprecated: allow for now
+
+    gosec:
+      excludes:
+        - G115  # integer overflow: validated conversions
+        - G404  # weak random: math/rand is fine for non-security randomness
+
+    gocritic:
+      enabled-checks:
+        - appendAssign
+        - argOrder
+        - badCond
+        - builtinShadow
+        - dupCase
+        - dupSubExpr
+        - nilValReturn
+        - rangeValCopy
+        - sliceClear
+      disabled-checks:
+        - hugeParam
+
+    revive:
+      rules:
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: error-return
+        - name: error-strings
+        - name: increment-decrement
+        - name: var-declaration
+
+    gocyclo:
+      min-complexity: 30
+
+    funlen:
+      lines: 100
+      statements: 60
+
+  exclusions:
+    warn-unused: true
+    rules:
+      - path: "_test\\.go"
+        linters:
+          - dupl
+          - funlen
+          - gocyclo
+          - errcheck
+          - unused
+      # G404: math/rand is acceptable in tests
+      - path: "_test\\.go"
+        linters:
+          - gosec
+        text: "G404"
+      # G704: SSRF false positive in tests using localhost
+      - path: "_test\\.go"
+        linters:
+          - gosec
+        text: "G704"
+      # G115: Integer overflow - intentional in bounded loops
+      - linters:
+          - gosec
+        text: "G115:"
+
+output:
+  formats:
+    text:
+      print-issued-lines: true
+      print-linter-name: true

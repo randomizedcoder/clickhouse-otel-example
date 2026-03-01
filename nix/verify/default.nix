@@ -10,6 +10,7 @@ let
   breakFixScripts = import ./break-fix.nix { inherit pkgs shellLib; };
   latencyScripts = import ./latency.nix { inherit pkgs shellLib; };
   testScripts = import ./test-harness.nix { inherit pkgs shellLib; };
+  integrationScripts = import ./integration.nix { inherit pkgs shellLib; };
 
   # Merge all scripts
   allScripts =
@@ -17,7 +18,8 @@ let
     // initScripts
     // breakFixScripts
     // latencyScripts
-    // testScripts;
+    // testScripts
+    // integrationScripts;
 
   # Script metadata for documentation and tooling
   scriptMetadata = {
@@ -159,6 +161,28 @@ let
       description = "Initialize ClickHouse with otel_logs table";
       component = "clickhouse";
     };
+
+    # Integration test scripts
+    test-docker-compose = {
+      category = "integration";
+      description = "Test Docker Compose deployment end-to-end";
+      component = "deployment";
+    };
+    test-minikube = {
+      category = "integration";
+      description = "Test standalone Minikube deployment end-to-end";
+      component = "deployment";
+    };
+    test-microvm = {
+      category = "integration";
+      description = "Test MicroVM with Minikube deployment end-to-end";
+      component = "deployment";
+    };
+    test-all-deployments = {
+      category = "integration";
+      description = "Run all deployment integration tests sequentially";
+      component = "deployment";
+    };
   };
 
 in
@@ -173,5 +197,6 @@ allScripts // {
     measure = builtins.filter (n: (scriptMetadata.${n}.category or "") == "measure") (builtins.attrNames scriptMetadata);
     init = builtins.filter (n: (scriptMetadata.${n}.category or "") == "init") (builtins.attrNames scriptMetadata);
     test = builtins.filter (n: (scriptMetadata.${n}.category or "") == "test") (builtins.attrNames scriptMetadata);
+    integration = builtins.filter (n: (scriptMetadata.${n}.category or "") == "integration") (builtins.attrNames scriptMetadata);
   };
 }

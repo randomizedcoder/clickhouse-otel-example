@@ -96,6 +96,13 @@ let
         Parser        json
         Reserve_Data  On
 
+    # Filter to only process Method 1 logs (FluentBit pipeline)
+    # Match logs containing "FluentBit" in the msg field to avoid processing other methods
+    [FILTER]
+        Name          grep
+        Match         *
+        Regex         msg FluentBit
+
     [FILTER]
         Name          lua
         Match         *
@@ -200,6 +207,9 @@ let
           driver: fluentd
           options:
             fluentd-address: localhost:24224
+            fluentd-async: "true"
+            fluentd-retry-wait: 1s
+            fluentd-max-retries: 30
             tag: loggen
         depends_on:
           - fluentbit
@@ -286,6 +296,12 @@ let
         RandomNumber UInt32 DEFAULT 0,
         RandomString LowCardinality(String) CODEC(ZSTD(1)),
         Count UInt64 DEFAULT 0,
+        -- Method column (deprecated - use Body content for pipeline identification)
+        -- Kept with DEFAULT for backward compatibility
+        -- Query by: Body LIKE '%FluentBit%', Body LIKE '%OTLP direct%', Body LIKE '%filelog receiver%'
+        Method LowCardinality(String) DEFAULT 'unknown' CODEC(ZSTD(1)),
+        -- Ingestion timestamp for latency measurement
+        IngestionTimestamp DateTime64(9) DEFAULT now64(9),
         INDEX idx_trace_id TraceId TYPE bloom_filter(0.001) GRANULARITY 1,
         INDEX idx_lower_body lower(Body) TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 8,
         INDEX idx_random_string RandomString TYPE set(100) GRANULARITY 4
@@ -311,15 +327,39 @@ let
 
       echo "Starting OTel demo stack..."
       docker compose -f ${composeFile} up -d
+
       echo ""
-      echo "Services:"
-      echo "  - ClickHouse: http://localhost:${toString ports.compose.clickhouseHttp}"
-      echo "  - HyperDX:    http://localhost:${toString ports.compose.hyperdxApp}"
+      echo "=============================================="
+      echo "  OTel Demo Stack Started (Docker Compose)"
+      echo "=============================================="
       echo ""
-      echo "Commands:"
-      echo "  nix run .#compose-logs  - View logs"
-      echo "  nix run .#compose-ps    - Check status"
-      echo "  nix run .#compose-down  - Stop stack"
+      echo "ACCESS POINTS:"
+      echo "  HyperDX UI:      http://localhost:${toString ports.compose.hyperdxApp}"
+      echo "  HyperDX API:     http://localhost:${toString ports.compose.hyperdxApi}"
+      echo "  ClickHouse HTTP: http://localhost:${toString ports.compose.clickhouseHttp}"
+      echo ""
+      echo "FIRST-TIME SETUP:"
+      echo "  nix run .#compose-setup    # Create connection, source, and dashboard"
+      echo ""
+      echo "VIEW LOGGEN LOGS:"
+      echo "  docker logs -f otel-loggen"
+      echo ""
+      echo "QUERY CLICKHOUSE:"
+      echo "  # Count logs"
+      echo "  curl 'http://localhost:${toString ports.compose.clickhouseHttp}/?query=SELECT+count()+FROM+otel_logs'"
+      echo ""
+      echo "  # View recent logs"
+      echo "  curl 'http://localhost:${toString ports.compose.clickhouseHttp}/?query=SELECT+*+FROM+otel_logs+ORDER+BY+Timestamp+DESC+LIMIT+5+FORMAT+Pretty'"
+      echo ""
+      echo "  # Interactive CLI"
+      echo "  docker exec -it otel-clickhouse clickhouse-client"
+      echo ""
+      echo "LIFECYCLE COMMANDS:"
+      echo "  nix run .#compose-ps           # Check status"
+      echo "  nix run .#compose-logs         # View all logs"
+      echo "  nix run .#compose-down         # Stop gracefully"
+      echo "  nix run .#compose-force-stop   # Force stop"
+      echo ""
     '';
   };
 
@@ -348,6 +388,19 @@ let
     runtimeInputs = [ pkgs.docker-compose ];
     text = ''
       docker compose -f ${composeFile} ps
+    '';
+  };
+
+  # Script to force stop docker-compose (aggressive cleanup)
+  composeForceStop = pkgs.writeShellApplication {
+    name = "compose-force-stop";
+    runtimeInputs = [ pkgs.docker ];
+    text = ''
+      cd "$(dirname ${composeFile})"
+      echo "Force stopping Docker Compose stack..."
+      docker compose -f ${composeFile} down --remove-orphans --volumes --timeout 0 || true
+      docker compose -f ${composeFile} kill || true
+      echo "Force stop complete."
     '';
   };
 
@@ -382,7 +435,7 @@ let
           field = "RandomNumber";
           where = "RandomNumber:>0";
           whereLanguage = "lucene";
-          groupBy = [];
+          groupBy = [ ];
           displayType = "line";
         }];
       }
@@ -413,7 +466,7 @@ let
           aggFn = "count";
           where = "";
           whereLanguage = "lucene";
-          groupBy = [];
+          groupBy = [ ];
           displayType = "line";
         }];
       }
@@ -623,5 +676,5 @@ let
 
 in
 {
-  inherit composeFile composeUp composeDown composeLogs composePs composeSetup dashboardJson;
+  inherit composeFile composeUp composeDown composeLogs composePs composeForceStop composeSetup dashboardJson;
 }

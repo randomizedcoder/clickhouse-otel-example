@@ -28,7 +28,7 @@ let
       verifyHelp = mkCategoryHelp "verify" categories.verify;
       breakFixHelp =
         if categories.break != [ ] then ''
-          Failure injection (for testing):
+          Failure injection - for testing:
           ${mkCategoryHelp "break" categories.break}
           ${mkCategoryHelp "fix" categories.fix}
           ${mkCategoryHelp "test" categories.test}
@@ -98,41 +98,43 @@ pkgs.mkShell {
   ];
 
   shellHook = ''
-    echo "========================================"
-    echo "ClickHouse OTel Pipeline Dev Environment"
-    echo "========================================"
-    echo ""
-    echo "Go version: $(go version)"
-    echo ""
-    echo "Build commands:"
-    echo "  nix build .#loggen           - Build Go application"
-    echo "  nix build .#loggen-image     - Build Go container"
-    echo "  nix build .#all-images       - Build all container images"
-    echo ""
-    echo "Test commands:"
-    echo "  go test ./...                - Run Go tests"
-    echo "  go test -race ./...          - Run Go race tests"
-    echo "  nix flake check              - Run all checks"
-    echo ""
-    echo "Run commands:"
-    echo "  nix run .#loggen             - Run the log generator"
-    echo "  nix run .#load-images        - Load images into Docker"
-    echo ""
-    echo "Development:"
-    echo "  go run ./cmd/loggen          - Run locally"
-    echo "  watchexec -e go 'go test ./...' - Watch and test"
-    echo ""
+        echo "========================================"
+        echo "ClickHouse OTel Pipeline Dev Environment"
+        echo "========================================"
+        echo ""
+        echo "Go version: $(go version)"
+        echo ""
+        echo "Build commands:"
+        echo "  nix build .#loggen           - Build Go application"
+        echo "  nix build .#loggen-image     - Build Go container"
+        echo "  nix build .#all-images       - Build all container images"
+        echo ""
+        echo "Test commands:"
+        echo "  go test ./...                - Run Go tests"
+        echo "  go test -race ./...          - Run Go race tests"
+        echo "  nix flake check              - Run all checks"
+        echo ""
+        echo "Run commands:"
+        echo "  nix run .#loggen             - Run the log generator"
+        echo "  nix run .#load-images        - Load images into Docker"
+        echo ""
+        echo "Development:"
+        echo "  go run ./cmd/loggen          - Run locally"
+        echo "  watchexec -e go 'go test ./...' - Watch and test"
+        echo ""
+        cat <<'HELPEOF'
     ${dynamicHelp}
+    HELPEOF
 
-    # Set Go environment
-    export GOPATH="$HOME/go"
-    export PATH="$GOPATH/bin:$PATH"
+        # Set Go environment
+        export GOPATH="$HOME/go"
+        export PATH="$GOPATH/bin:$PATH"
 
-    # Development defaults
-    export LOGGEN_MAX_NUMBER="100"
-    export LOGGEN_NUM_STRINGS="10"
-    export LOGGEN_SLEEP_DURATION="5s"
-    export LOGGEN_HEALTH_PORT="8081"
+        # Development defaults
+        export LOGGEN_MAX_NUMBER="100"
+        export LOGGEN_NUM_STRINGS="10"
+        export LOGGEN_SLEEP_DURATION="5s"
+        export LOGGEN_HEALTH_PORT="8081"
   '';
 
   # Environment variables

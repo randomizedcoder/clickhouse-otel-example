@@ -1,0 +1,349 @@
+namespaceOverride: data
+
+env:
+  - name: CLICKHOUSE_PASSWORD
+    valueFrom:
+      secretKeyRef:
+        name: clickhouse-admin-password
+        key: password
+
+resources:
+  requests:
+    memory: 512Mi
+    cpu: 500m
+  limits:
+    memory: 2048Mi
+    cpu: 1000m
+
+tolerations:
+  - operator: Exists
+    effect: NoSchedule
+
+config:
+  service: |
+    [SERVICE]
+      Daemon Off
+      Flush 10
+      Log_Level info
+      Parsers_File parsers.conf
+      Parsers_File custom_parsers.conf
+      HTTP_Server On
+      HTTP_Listen 0.0.0.0
+      HTTP_Port 2020
+      Health_Check On
+
+  inputs: |
+    [INPUT]
+        Name tail
+        Path /var/log/containers/*.log
+        multiline.parser docker, cri
+        Tag kube.*
+        Mem_Buf_Limit 10MB
+        Skip_Long_Lines On
+
+    [INPUT]
+        Name systemd
+        Tag host.*
+        Systemd_Filter _SYSTEMD_UNIT=kubelet.service
+        Read_From_Tail On
+
+  filters: |
+    [FILTER]
+        Name kubernetes
+        Match kube.*
+        Merge_Log On
+        Keep_Log Off
+        K8S-Logging.Parser On
+        K8S-Logging.Exclude On
+
+    # Transform to OTEL format
+    [FILTER]
+        Name lua
+        Match kube.*
+        script /fluent-bit/scripts/otel_transform.lua
+        call transform_to_otel
+
+  outputs: |
+    [OUTPUT]
+        name http
+        tls off
+        match kube.*
+        host clickhouse-k8s-logs.data.svc.cluster.local
+        port 8123
+        URI /?query=INSERT+INTO+kubernetes.otel_logs+FORMAT+JSONEachRow&async_insert=1
+        format json_stream
+        http_user admin
+        http_passwd ${CLICKHOUSE_PASSWORD}
+        retry_limit 5
+        compress gzip
+
+  customParsers: |
+    [PARSER]
+        Name docker_no_time
+        Format json
+        Time_Keep Off
+        Time_Key time
+        Time_Format %Y-%m-%d %H:%M:%S.%L
+
+    [PARSER]
+        Name json_optional
+        Format json
+        Time_Keep Off
+
+luaScripts:
+  otel_transform.lua: |
+    -- ============================================================================
+    -- OpenTelemetry Log Transformation for Fluent Bit
+    -- ============================================================================
+    -- Transforms Kubernetes logs to OTEL format with:
+    -- 1. Flat Body field for full-text search
+    -- 2. Top-level TraceId for distributed tracing
+    -- 3. Standardized severity levels
+    -- 4. OTEL resource attributes
+    -- ============================================================================
+
+    -- OTEL Severity mapping
+    local severity_map = {
+        trace = {text = "TRACE", number = 1},
+        debug = {text = "DEBUG", number = 5},
+        info = {text = "INFO", number = 9},
+        warn = {text = "WARN", number = 13},
+        warning = {text = "WARN", number = 13},
+        error = {text = "ERROR", number = 17},
+        fatal = {text = "FATAL", number = 21},
+        panic = {text = "FATAL", number = 21}
+    }
+
+    -- Extract severity from various log formats
+    function get_severity(log_record)
+        local level = nil
+
+        if log_record['level'] ~= nil then
+            level = string.lower(tostring(log_record['level']))
+        elseif log_record['log.level'] ~= nil then
+            level = string.lower(tostring(log_record['log.level']))
+        elseif log_record['error_level'] ~= nil then
+            level = string.lower(tostring(log_record['error_level']))
+        end
+
+        if level and severity_map[level] then
+            return severity_map[level]
+        end
+
+        return {text = "INFO", number = 9}
+    end
+
+    -- Extract trace context
+    function extract_trace_context(log_record)
+        local trace_id = ""
+        local span_id = ""
+
+        if log_record['trace-id'] ~= nil then
+            trace_id = tostring(log_record['trace-id'])
+        elseif log_record['traceId'] ~= nil then
+            trace_id = tostring(log_record['traceId'])
+        elseif log_record['trace_id'] ~= nil then
+            trace_id = tostring(log_record['trace_id'])
+        end
+
+        if log_record['span-id'] ~= nil then
+            span_id = tostring(log_record['span-id'])
+        elseif log_record['spanId'] ~= nil then
+            span_id = tostring(log_record['spanId'])
+        elseif log_record['span_id'] ~= nil then
+            span_id = tostring(log_record['span_id'])
+        end
+
+        return trace_id, span_id
+    end
+
+    -- CRITICAL: Extract message as FLAT STRING for full-text search
+    function extract_message_body(log_record)
+        local message = ""
+
+        -- Priority 1: 'msg' field (Siden Go services)
+        if log_record['msg'] ~= nil then
+            message = tostring(log_record['msg'])
+        -- Priority 2: 'message' field
+        elseif log_record['message'] ~= nil then
+            message = tostring(log_record['message'])
+        -- Priority 3: 'log' field (Istio proxy)
+        elseif log_record['log'] ~= nil then
+            message = tostring(log_record['log'])
+        -- Priority 4: Try to stringify the record
+        else
+            message = tostring(log_record)
+        end
+
+        return message
+    end
+
+    -- Recursively flatten nested tables/maps into dot-notation attributes
+    function flatten_table(tbl, prefix, result)
+        for key, value in pairs(tbl) do
+            local attr_name = prefix .. tostring(key)
+            local value_type = type(value)
+
+            if value_type == 'table' then
+                -- Check if it's an array (sequential numeric keys starting from 1)
+                local is_array = true
+                local count = 0
+                for k, v in pairs(value) do
+                    count = count + 1
+                    if type(k) ~= 'number' or k ~= count then
+                        is_array = false
+                        break
+                    end
+                end
+
+                if is_array and count > 0 then
+                    -- Serialize array as JSON-like string
+                    local items = {}
+                    for i = 1, count do
+                        local item = value[i]
+                        if type(item) == 'string' then
+                            table.insert(items, '"' .. tostring(item) .. '"')
+                        else
+                            table.insert(items, tostring(item))
+                        end
+                    end
+                    result[attr_name] = '[' .. table.concat(items, ',') .. ']'
+                else
+                    -- Recursively flatten nested object
+                    flatten_table(value, attr_name .. '.', result)
+                end
+            elseif value_type == 'string' or value_type == 'number' or value_type == 'boolean' then
+                result[attr_name] = tostring(value)
+            elseif value_type ~= 'nil' then
+                -- For other types, convert to string
+                result[attr_name] = tostring(value)
+            end
+        end
+    end
+
+    -- Main transformation function
+    function transform_to_otel(tag, timestamp, record)
+        local otel_record = {}
+
+        -- Timestamps in ClickHouse DateTime64 format (without 'T' and 'Z')
+        local ts_str = os.date("!%Y-%m-%d %H:%M:%S", timestamp)
+        local ns = math.floor((timestamp - math.floor(timestamp)) * 1000000000)
+        otel_record['Timestamp'] = string.format("%s.%09d", ts_str, ns)
+        otel_record['ObservedTimestamp'] = string.format("%s.%09d", ts_str, ns)
+
+        -- Extract Kubernetes metadata
+        local k8s = record['kubernetes'] or {}
+        local labels = k8s['labels'] or {}
+
+        -- Resource Attributes Map
+        local resource_attrs = {}
+
+        -- SERVICE NAME (replaces 'app' field)
+        local service_name = labels['app'] or
+                           labels['app.kubernetes.io/name'] or
+                           k8s['container_name'] or
+                           'unknown'
+        resource_attrs['service.name'] = service_name
+
+        -- Service version
+        local service_version = labels['version'] or
+                              labels['tags.datadoghq.com/version'] or ''
+        if service_version ~= '' then
+            resource_attrs['service.version'] = service_version
+        end
+
+        -- Environment
+        local env = labels['tags.datadoghq.com/env'] or 'unknown'
+        resource_attrs['deployment.environment'] = env
+
+        -- CONTAINER NAME (for istio-proxy filtering)
+        resource_attrs['k8s.container.name'] = k8s['container_name'] or ''
+
+        -- Other Kubernetes attributes
+        resource_attrs['k8s.pod.name'] = k8s['pod_name'] or ''
+        resource_attrs['k8s.pod.uid'] = k8s['pod_id'] or ''
+        resource_attrs['k8s.namespace.name'] = k8s['namespace_name'] or ''
+        resource_attrs['k8s.node.name'] = k8s['host'] or ''
+        resource_attrs['k8s.deployment.name'] = labels['app.kubernetes.io/instance'] or ''
+        resource_attrs['container.id'] = k8s['docker_id'] or ''
+        resource_attrs['container.image.name'] = k8s['container_image'] or ''
+
+        -- SIDEN SERVICE FLAG (for separation logic)
+        local siden_service = labels['siden_service'] or ''
+        if siden_service ~= '' then
+            resource_attrs['siden.service'] = siden_service
+        end
+
+        otel_record['ResourceAttributes'] = resource_attrs
+
+        -- Process log body
+        -- Note: Kubernetes filter's Merge_Log merges parsed fields to top level of record
+        local log_attrs = {}
+        local trace_id = ""
+        local span_id = ""
+        local severity = {text = "INFO", number = 9}
+        local body = ""
+
+        -- Check if this is a structured log (JSON was parsed by Kubernetes filter)
+        -- Merged fields are at top level: record['msg'], record['trace-id'], etc.
+        if record['msg'] ~= nil or record['message'] ~= nil or record['level'] ~= nil then
+            -- Structured log - fields are at top level from Merge_Log
+            trace_id, span_id = extract_trace_context(record)
+            severity = get_severity(record)
+            body = extract_message_body(record)
+
+            -- Extract additional attributes from top level
+            if record['caller'] ~= nil then
+                log_attrs['code.filepath'] = tostring(record['caller'])
+            end
+            if record['error'] ~= nil then
+                log_attrs['exception.message'] = tostring(record['error'])
+            end
+            -- Flatten context field into individual attributes
+            if record['context'] ~= nil and type(record['context']) == 'table' then
+                flatten_table(record['context'], 'context.', log_attrs)
+            elseif record['context'] ~= nil then
+                log_attrs['context'] = tostring(record['context'])
+            end
+            if record['stacktrace'] ~= nil then
+                log_attrs['exception.stacktrace'] = tostring(record['stacktrace'])
+            end
+        else
+            -- Plain text log (istio-proxy, infrastructure) - use log field
+            local log_data = record['log']
+            if type(log_data) == 'string' then
+                body = log_data
+            else
+                body = tostring(log_data)
+            end
+
+            -- Detect severity from text
+            local body_lower = string.lower(body)
+            if string.find(body_lower, "error") then
+                severity = {text = "ERROR", number = 17}
+            elseif string.find(body_lower, "warn") then
+                severity = {text = "WARN", number = 13}
+            elseif string.find(body_lower, "fatal") then
+                severity = {text = "FATAL", number = 21}
+            elseif string.find(body_lower, "debug") then
+                severity = {text = "DEBUG", number = 5}
+            end
+        end
+
+        -- Set OTEL fields
+        otel_record['TraceId'] = trace_id
+        otel_record['SpanId'] = span_id
+        otel_record['TraceFlags'] = 0
+        otel_record['SeverityText'] = severity.text
+        otel_record['SeverityNumber'] = severity.number
+        otel_record['Body'] = body  -- FLAT STRING - fixes HyperDX search!
+
+        -- Add stream info if available
+        if record['stream'] ~= nil then
+            log_attrs['stream'] = record['stream']
+        end
+
+        otel_record['LogAttributes'] = log_attrs
+
+        return 2, timestamp, otel_record
+    end

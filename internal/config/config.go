@@ -21,6 +21,12 @@ type Config struct {
 
 	// HealthPort is the port for health check endpoints.
 	HealthPort int
+
+	// OTelEndpoint is the OTLP exporter endpoint (host:port).
+	OTelEndpoint string
+
+	// OTelInsecure controls whether to use insecure (non-TLS) connections.
+	OTelInsecure bool
 }
 
 // Default values.
@@ -29,6 +35,8 @@ const (
 	DefaultNumStrings    = 10
 	DefaultSleepDuration = 5 * time.Second
 	DefaultHealthPort    = 8081
+	DefaultOTelEndpoint  = "otel-collector:4318"
+	DefaultOTelInsecure  = true
 )
 
 // Load parses configuration from flags and environment variables.
@@ -44,6 +52,10 @@ func Load() *Config {
 		"Duration between log emissions (env: LOGGEN_SLEEP_DURATION)")
 	flag.IntVar(&cfg.HealthPort, "health-port", DefaultHealthPort,
 		"Port for health check server (env: LOGGEN_HEALTH_PORT)")
+	flag.StringVar(&cfg.OTelEndpoint, "otel-endpoint", DefaultOTelEndpoint,
+		"OTLP exporter endpoint (env: OTEL_EXPORTER_OTLP_ENDPOINT)")
+	flag.BoolVar(&cfg.OTelInsecure, "otel-insecure", DefaultOTelInsecure,
+		"Use insecure connection (env: OTEL_EXPORTER_OTLP_INSECURE)")
 
 	flag.Parse()
 
@@ -60,6 +72,8 @@ func LoadWithDefaults() *Config {
 		NumStrings:    DefaultNumStrings,
 		SleepDuration: DefaultSleepDuration,
 		HealthPort:    DefaultHealthPort,
+		OTelEndpoint:  DefaultOTelEndpoint,
+		OTelInsecure:  DefaultOTelInsecure,
 	}
 	cfg.applyEnvOverrides()
 	return cfg
@@ -88,5 +102,13 @@ func (c *Config) applyEnvOverrides() {
 		if i, err := strconv.Atoi(v); err == nil && i > 0 && i < 65536 {
 			c.HealthPort = i
 		}
+	}
+
+	if v := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT"); v != "" {
+		c.OTelEndpoint = v
+	}
+
+	if v := os.Getenv("OTEL_EXPORTER_OTLP_INSECURE"); v != "" {
+		c.OTelInsecure = v == "true" || v == "1"
 	}
 }

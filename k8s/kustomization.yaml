@@ -8,6 +8,9 @@ resources:
   - loggen/deployment.yaml
   - fluentbit/configmap.yaml
   - fluentbit/daemonset.yaml
+  - otel-collector/configmap.yaml
+  - otel-collector/deployment.yaml
+  - otel-collector/service.yaml
   - clickhouse/configmap.yaml
   - clickhouse/statefulset.yaml
   # MongoDB backend (required for HyperDX - FerretDB lacks TTL index support)

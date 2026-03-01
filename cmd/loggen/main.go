@@ -7,12 +7,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/randomizedcoder/clickhouse-otel-example/internal/config"
 	"github.com/randomizedcoder/clickhouse-otel-example/internal/health"
 	"github.com/randomizedcoder/clickhouse-otel-example/internal/loop"
+	"github.com/randomizedcoder/clickhouse-otel-example/internal/otel"
 )
 
 // version is set at build time via ldflags.
@@ -30,7 +32,7 @@ func run() int {
 	logger, err := zap.NewProduction()
 	if err != nil {
 		// Fallback to stderr if logger creation fails
-		os.Stderr.WriteString("failed to create logger: " + err.Error() + "\n")
+		_, _ = os.Stderr.WriteString("failed to create logger: " + err.Error() + "\n")
 		return 1
 	}
 	defer func() {
@@ -43,22 +45,32 @@ func run() int {
 		zap.Int("num_strings", cfg.NumStrings),
 		zap.Duration("sleep_duration", cfg.SleepDuration),
 		zap.Int("health_port", cfg.HealthPort),
+		zap.String("otel_endpoint", cfg.OTelEndpoint),
 	)
 
 	// Create cancellable context for coordinated shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Initialize OTel SDK for direct OTLP logging (Method 2)
+	otelProvider, err := otel.NewLoggerProvider(ctx, cfg, "loggen", version)
+	if err != nil {
+		logger.Warn("failed to initialize OTel logger, Method 2 (OTLP) will be disabled",
+			zap.Error(err))
+	} else {
+		logger.Info("OTel logger initialized", zap.String("endpoint", cfg.OTelEndpoint))
+	}
+
 	// Start health check server
 	healthServer := health.NewServer(cfg.HealthPort, logger)
 	go func() {
-		if err := healthServer.Start(ctx); err != nil {
-			logger.Error("health server failed", zap.Error(err))
+		if startErr := healthServer.Start(ctx); startErr != nil {
+			logger.Error("health server failed", zap.Error(startErr))
 			cancel()
 		}
 	}()
 
-	// Start main logging loop
+	// Start main logging loop with OTel logger
 	looper := loop.New(cfg, logger)
 	go looper.Run(ctx)
 
@@ -69,12 +81,23 @@ func run() int {
 	sig := <-sigChan
 	logger.Info("received shutdown signal", zap.String("signal", sig.String()))
 
-	// Graceful shutdown
+	// Cancel main context to signal goroutines to stop
 	cancel()
 
+	// Create shutdown context with timeout for cleanup operations
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutdownCancel()
+
+	// Shutdown OTel provider
+	if otelProvider != nil {
+		if shutdownErr := otelProvider.Shutdown(shutdownCtx); shutdownErr != nil {
+			logger.Error("OTel shutdown failed", zap.Error(shutdownErr))
+		}
+	}
+
 	// Shutdown health server
-	if err := healthServer.Shutdown(context.Background()); err != nil {
-		logger.Error("health server shutdown failed", zap.Error(err))
+	if shutdownErr := healthServer.Shutdown(shutdownCtx); shutdownErr != nil {
+		logger.Error("health server shutdown failed", zap.Error(shutdownErr))
 	}
 
 	logger.Info("loggen stopped")

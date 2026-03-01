@@ -1,23 +1,32 @@
 package loop
 
 import (
-	"math/rand/v2"
+	"crypto/rand"
+	"math/big"
 )
 
-// RandomNumberInRange returns a random integer in [0, max].
+// RandomNumberInRange returns a random integer in [0, maxVal] using crypto/rand.
 // This is a pure function for easy testing.
-func RandomNumberInRange(rng *rand.Rand, max int) int {
-	if max <= 0 {
+func RandomNumberInRange(maxVal int) int {
+	if maxVal <= 0 {
 		return 0
 	}
-	return rng.IntN(max + 1)
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(maxVal+1)))
+	if err != nil {
+		return 0
+	}
+	return int(n.Int64())
 }
 
-// RandomStringFromSlice returns a random element from the slice.
+// RandomStringFromSlice returns a random element from the slice using crypto/rand.
 // This is a pure function for easy testing.
-func RandomStringFromSlice(rng *rand.Rand, strings []string) string {
+func RandomStringFromSlice(strings []string) string {
 	if len(strings) == 0 {
 		return ""
 	}
-	return strings[rng.IntN(len(strings))]
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(strings))))
+	if err != nil {
+		return strings[0]
+	}
+	return strings[n.Int64()]
 }

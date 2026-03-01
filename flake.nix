@@ -65,6 +65,12 @@
             inherit (pkgs) writeText;
           };
 
+          # Minikube lifecycle management
+          minikube = import ./nix/minikube.nix {
+            inherit pkgs;
+            lib = pkgs.lib;
+          };
+
           # Verification scripts (modular)
           verify = pkgs.callPackage ./nix/verify { };
 
@@ -112,22 +118,103 @@
               program = "${goApp}/bin/loggen";
             };
 
+            # Go development apps (using writeShellApplication for shellcheck)
+            build = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "build";
+                runtimeInputs = [ pkgs.go_1_26 ];
+                text = ''
+                  cd ${self}
+                  go build -v ./...
+                '';
+              }}/bin/build";
+            };
+
             test = {
               type = "app";
-              program = toString (pkgs.writeShellScript "test" ''
-                set -e
-                cd ${self}
-                ${pkgs.go_1_26}/bin/go test -v ./...
-              '');
+              program = "${pkgs.writeShellApplication {
+                name = "test";
+                runtimeInputs = [ pkgs.go_1_26 ];
+                text = ''
+                  cd ${self}
+                  go test -v ./...
+                '';
+              }}/bin/test";
             };
 
             test-race = {
               type = "app";
-              program = toString (pkgs.writeShellScript "test-race" ''
-                set -e
-                cd ${self}
-                CGO_ENABLED=1 ${pkgs.go_1_26}/bin/go test -race -v ./...
-              '');
+              program = "${pkgs.writeShellApplication {
+                name = "test-race";
+                runtimeInputs = [ pkgs.go_1_26 ];
+                text = ''
+                  cd ${self}
+                  CGO_ENABLED=1 go test -race -v ./...
+                '';
+              }}/bin/test-race";
+            };
+
+            vet = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "vet";
+                runtimeInputs = [ pkgs.go_1_26 ];
+                text = ''
+                  cd ${self}
+                  go vet ./...
+                '';
+              }}/bin/vet";
+            };
+
+            # Tiered linting (quick -> standard -> comprehensive)
+            lint-quick = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "lint-quick";
+                runtimeInputs = [ pkgs.go_1_26 pkgs.golangci-lint ];
+                text = ''
+                  cd ${self}
+                  golangci-lint run --config .golangci-quick.yml --timeout 60s ./...
+                '';
+              }}/bin/lint-quick";
+            };
+
+            lint = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "lint";
+                runtimeInputs = [ pkgs.go_1_26 pkgs.golangci-lint ];
+                text = ''
+                  cd ${self}
+                  golangci-lint run --config .golangci.yml --timeout 5m ./...
+                '';
+              }}/bin/lint";
+            };
+
+            lint-comprehensive = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "lint-comprehensive";
+                runtimeInputs = [ pkgs.go_1_26 pkgs.golangci-lint ];
+                text = ''
+                  cd ${self}
+                  golangci-lint run --config .golangci-comprehensive.yml --timeout 15m ./...
+                '';
+              }}/bin/lint-comprehensive";
+            };
+
+            # Security scanning
+            sec = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "sec";
+                runtimeInputs = [ pkgs.go_1_26 pkgs.gosec ];
+                text = ''
+                  cd ${self}
+                  gosec -exclude=G115 -fmt=text ./...
+                '';
+              }}/bin/sec";
             };
 
             load-images = {
@@ -161,6 +248,37 @@
               program = "${compose.composeSetup}/bin/compose-setup";
             };
 
+            compose-force-stop = {
+              type = "app";
+              program = "${compose.composeForceStop}/bin/compose-force-stop";
+            };
+
+            # Minikube lifecycle apps
+            minikube-up = {
+              type = "app";
+              program = "${minikube.minikubeUp}/bin/minikube-up";
+            };
+
+            minikube-status = {
+              type = "app";
+              program = "${minikube.minikubeStatus}/bin/minikube-status";
+            };
+
+            minikube-logs = {
+              type = "app";
+              program = "${minikube.minikubeLogs}/bin/minikube-logs";
+            };
+
+            minikube-down = {
+              type = "app";
+              program = "${minikube.minikubeDown}/bin/minikube-down";
+            };
+
+            minikube-delete = {
+              type = "app";
+              program = "${minikube.minikubeDelete}/bin/minikube-delete";
+            };
+
             # Convenience scripts for VM management (using writeShellApplication for shellcheck)
             stop-vm = {
               type = "app";
@@ -187,6 +305,116 @@
                   echo "Run 'nix run .#microvm' to start fresh"
                 '';
               }}/bin/clean-vm";
+            };
+
+            # MicroVM help - show usage instructions after VM starts
+            microvm-help = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "microvm-help";
+                text = ''
+                  echo ""
+                  echo "=============================================="
+                  echo "  OTel Demo Stack (MicroVM + K3s)"
+                  echo "=============================================="
+                  echo ""
+                  echo "ACCESS POINTS:"
+                  echo "  HyperDX UI:      http://localhost:30808"
+                  echo "  HyperDX API:     http://localhost:30800"
+                  echo "  ClickHouse HTTP: http://localhost:28123"
+                  echo "  SSH:             ssh -p 22022 demo@localhost  (password: demo)"
+                  echo ""
+                  echo "VIEW LOGGEN LOGS:"
+                  echo "  # From host (via SSH)"
+                  echo "  ssh -p 22022 demo@localhost 'sudo k3s kubectl -n otel-demo logs -f deployment/loggen'"
+                  echo ""
+                  echo "  # Inside VM"
+                  echo "  sudo k3s kubectl -n otel-demo logs -f deployment/loggen"
+                  echo ""
+                  echo "QUERY CLICKHOUSE:"
+                  echo "  # From host (via HTTP API)"
+                  echo "  curl 'http://localhost:28123/?query=SELECT+count()+FROM+otel_logs'"
+                  echo ""
+                  echo "  # From host (via SSH)"
+                  echo "  ssh -p 22022 demo@localhost 'sudo k3s kubectl -n otel-demo exec -it sts/clickhouse -- \\"
+                  echo "    clickhouse-client --query \"SELECT count() FROM otel_logs\"'"
+                  echo ""
+                  echo "  # Inside VM - Interactive CLI"
+                  echo "  sudo k3s kubectl -n otel-demo exec -it sts/clickhouse -- clickhouse-client"
+                  echo ""
+                  echo "  # View recent logs"
+                  echo "  curl 'http://localhost:28123/?query=SELECT+*+FROM+otel_logs+ORDER+BY+Timestamp+DESC+LIMIT+5+FORMAT+Pretty'"
+                  echo ""
+                  echo "CHECK POD STATUS:"
+                  echo "  # From host"
+                  echo "  ssh -p 22022 demo@localhost 'sudo k3s kubectl -n otel-demo get pods'"
+                  echo ""
+                  echo "  # Inside VM"
+                  echo "  sudo k3s kubectl -n otel-demo get pods"
+                  echo ""
+                  echo "LIFECYCLE COMMANDS:"
+                  echo "  nix run .#microvm-status  - Check VM and pod status"
+                  echo "  nix run .#microvm-stop    - Graceful shutdown"
+                  echo "  nix run .#stop-vm         - Force kill VM process"
+                  echo "  nix run .#clean-vm        - Remove VM state files"
+                  echo ""
+                '';
+              }}/bin/microvm-help";
+            };
+
+            # MicroVM status check
+            microvm-status = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "microvm-status";
+                runtimeInputs = [ pkgs.openssh pkgs.procps ];
+                text = ''
+                  echo "=== MicroVM Status ==="
+
+                  if pgrep -f "qemu.*otel-demo" > /dev/null; then
+                    echo "VM Process: RUNNING"
+
+                    echo ""
+                    echo "Checking SSH connectivity..."
+                    if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p 22022 demo@localhost "echo 'SSH: OK'" 2>/dev/null; then
+                      echo ""
+                      echo "=== Pods inside VM ==="
+                      ssh -p 22022 demo@localhost "sudo k3s kubectl -n otel-demo get pods 2>/dev/null || sudo kubectl -n otel-demo get pods 2>/dev/null" || echo "(kubectl not accessible)"
+                    else
+                      echo "SSH: NOT READY (VM still booting?)"
+                    fi
+                  else
+                    echo "VM Process: NOT RUNNING"
+                    exit 1
+                  fi
+                '';
+              }}/bin/microvm-status";
+            };
+
+            # MicroVM graceful shutdown
+            microvm-stop = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "microvm-stop";
+                runtimeInputs = [ pkgs.openssh pkgs.procps ];
+                text = ''
+                  echo "=== Graceful MicroVM Shutdown ==="
+
+                  if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p 22022 root@localhost "poweroff" 2>/dev/null; then
+                    echo "Shutdown command sent. Waiting for VM to stop..."
+                    sleep 5
+
+                    if pgrep -f "qemu.*otel-demo" > /dev/null; then
+                      echo "VM still running. Use 'nix run .#stop-vm' to force kill."
+                    else
+                      echo "VM stopped gracefully."
+                    fi
+                  else
+                    echo "Could not connect to VM. It may not be running."
+                    echo "Use 'nix run .#stop-vm' to force kill any orphaned processes."
+                  fi
+                '';
+              }}/bin/microvm-stop";
             };
           } // verifyApps // (if system == "x86_64-linux" then
           # MicroVM runners (x86_64-linux only)

@@ -12,7 +12,7 @@ buildGoModule.override { go = go_1_26; } rec {
 
   # Vendor hash - set to null for local development
   # After first build, update this with the correct hash
-  vendorHash = "sha256-+9nnwhPZJexWQZz+oUGeXRf9CLkJbT9E8vi9K4U6iE0=";
+  vendorHash = null;
 
   # Build configuration - disable CGO for static binary
   env.CGO_ENABLED = "0";

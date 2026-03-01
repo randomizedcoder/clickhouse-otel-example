@@ -120,7 +120,8 @@ let
         app: hyperdx
   '';
 
-in pkgs.runCommand "k8s-manifests" { } ''
+in
+pkgs.runCommand "k8s-manifests" { } ''
   mkdir -p $out/hyperdx
 
   # Copy static manifests (excluding hyperdx deployment which we generate)
