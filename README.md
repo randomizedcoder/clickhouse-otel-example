@@ -1,25 +1,42 @@
 # ClickHouse OpenTelemetry Pipeline Demo
 
-**Last Updated:** 2026-02-25
+**Last Updated:** 2026-03-01
 
 A complete demonstration of an OpenTelemetry logs pipeline using Nix for reproducible builds. The pipeline collects JSON logs from a Go application, transforms them to OTel format via FluentBit, stores them in ClickHouse, and visualizes them with HyperDX.
 
 ## Architecture
 
+The pipeline supports three logging methods for comparison:
+
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Loggen    │────▶│  FluentBit  │────▶│ ClickHouse  │◀────│   HyperDX   │
-│  (Go App)   │     │  (DaemonSet)│     │ (StatefulSet│     │    (UI)     │
-│             │     │  + Lua      │     │             │     │             │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-     JSON logs      Transform to OTel    Store logs         Query & visualize
+                                        ┌─────────────┐
+                                  ┌────▶│  FluentBit  │────┐
+                                  │     │  (Lua)      │    │
+                                  │     └─────────────┘    │
+┌─────────────┐                   │                        │     ┌─────────────┐     ┌─────────────┐
+│   Loggen    │──Method 1 (Zap)───┤                        ├────▶│ ClickHouse  │◀────│   HyperDX   │
+│  (Go App)   │                   │     ┌─────────────┐    │     │ (StatefulSet│     │    (UI)     │
+│             │──Method 2 (OTLP)──┼────▶│    OTel     │────┤     │             │     │             │
+│             │                   │     │  Collector  │    │     └─────────────┘     └─────────────┘
+│             │──Method 3 (JSON)──┼────▶│  (filelog)  │────┘
+└─────────────┘                   │     └─────────────┘
+         (3 logs per tick)        │           ▲
+                                  └───────────┘
+                                  (stdout files)
 ```
+
+| Method | Path | Latency |
+|--------|------|---------|
+| FluentBit+Lua | stdout → FluentBit → ClickHouse | ~6s |
+| OTLP Direct | SDK → OTel Collector → ClickHouse | ~2s |
+| Filelog | stdout → OTel Collector filelog → ClickHouse | ~1s |
 
 ## Table of Contents
 
 - [What's Built](#whats-built)
 - [Demo Credentials](#demo-credentials)
 - [Quick Start](#quick-start)
+- [Docker Compose (Local Development)](#docker-compose-local-development)
 - [Configuration](#configuration)
 - [Kubernetes Deployment](#kubernetes-deployment)
 - [Pipeline Verification](#pipeline-verification)
@@ -76,12 +93,15 @@ kubectl apply -k k8s/
 
 ### FluentBit
 - DaemonSet deployment for Kubernetes log collection
-- Lua script transforms JSON to OpenTelemetry format
-- Outputs to ClickHouse HTTP interface
+- Kubernetes filter enriches logs with pod metadata (labels, node name)
+- Lua script transforms JSON to OpenTelemetry format with dynamic service names
+- Outputs to ClickHouse HTTP interface with async inserts and gzip compression
+- 2-second flush interval for batch efficiency
 
 ### ClickHouse
-- HyperDX-compatible `otel_logs` table schema
-- Materialized views for efficient querying
+- HyperDX-compatible `otel_logs` table schema with ObservedTimestamp
+- MATERIALIZED columns for efficient K8s metadata queries (ContainerName, PodName, NamespaceName, NodeName)
+- Bloom filter and set indexes for fast filtering
 - Persistent storage via StatefulSet
 
 ### HyperDX
@@ -89,13 +109,117 @@ kubectl apply -k k8s/
 - Local fonts from nixpkgs (no Google Fonts CDN dependency)
 - Next.js standalone output for production deployment
 
-## Quick Start
+## Quickstart
 
 ### Prerequisites
-- Nix with flakes enabled
-- Docker (for loading images)
 
-### Build Everything
+- **Nix** with flakes enabled
+- **Docker** (for Docker Compose and loading images)
+- **For MicroVM:** Linux with KVM support, sudo access
+
+---
+
+### Option 1: Docker Compose (Fastest)
+
+```bash
+nix run .#compose-up           # Start (prints helpful instructions)
+nix run .#compose-ps           # Check status
+nix run .#compose-logs         # View all logs
+nix run .#compose-down         # Stop gracefully
+nix run .#compose-force-stop   # Force stop (if needed)
+```
+
+**Access:** http://localhost:38080 (HyperDX)
+
+**First-time setup:**
+```bash
+nix run .#compose-setup        # Create HyperDX dashboard
+```
+
+**View logs & query data:**
+```bash
+# Loggen container logs
+docker logs -f otel-loggen
+
+# Query ClickHouse
+curl 'http://localhost:38123/?query=SELECT+count()+FROM+otel_logs'
+
+# Interactive ClickHouse CLI
+docker exec -it otel-clickhouse clickhouse-client
+```
+
+---
+
+### Option 2: Minikube (Full Kubernetes)
+
+```bash
+nix run .#minikube-up          # Start cluster (prints helpful instructions)
+nix run .#minikube-status      # Check cluster and pod status
+nix run .#minikube-logs        # View pod logs
+nix run .#minikube-down        # Stop gracefully (preserves data)
+nix run .#minikube-delete      # Delete completely
+```
+
+**Access:** Run `minikube service -n otel-demo hyperdx --url`
+
+**View logs & query data:**
+```bash
+# Loggen pod logs
+kubectl -n otel-demo logs -f deployment/loggen
+
+# Query ClickHouse
+kubectl -n otel-demo exec -it sts/clickhouse -- \
+  clickhouse-client --query 'SELECT count() FROM otel_logs'
+
+# Interactive ClickHouse CLI
+kubectl -n otel-demo exec -it sts/clickhouse -- clickhouse-client
+```
+
+---
+
+### Option 3: MicroVM + K3s (Isolated)
+
+```bash
+sudo nix run .#microvm-k3s     # Start VM with K3s
+nix run .#microvm-help         # Show usage instructions
+nix run .#microvm-status       # Check VM and pod status
+nix run .#microvm-stop         # Graceful shutdown
+nix run .#stop-vm              # Force kill (if needed)
+nix run .#clean-vm             # Remove VM state files
+```
+
+**Access:** http://localhost:30808 (HyperDX), SSH: `ssh -p 22022 demo@localhost`
+
+**View logs & query data:**
+```bash
+# Loggen pod logs (via SSH)
+ssh -p 22022 demo@localhost 'sudo k3s kubectl -n otel-demo logs -f deployment/loggen'
+
+# Query ClickHouse (via HTTP from host)
+curl 'http://localhost:28123/?query=SELECT+count()+FROM+otel_logs'
+
+# Interactive ClickHouse CLI (inside VM)
+ssh -p 22022 demo@localhost
+sudo k3s kubectl -n otel-demo exec -it sts/clickhouse -- clickhouse-client
+```
+
+---
+
+### Run the Test Suite
+
+```bash
+# Run all deployment tests
+nix run .#test-all-deployments
+
+# Or individually
+nix run .#test-docker-compose  # Test Docker Compose
+nix run .#test-minikube        # Test Minikube (all 3 logging pipelines)
+nix run .#test-microvm         # Test MicroVM
+```
+
+---
+
+### Build Images Manually
 
 ```bash
 # Enter development shell
@@ -104,16 +228,7 @@ nix develop
 # Build all container images
 nix build .#all-images
 
-# Or build individually
-nix build .#loggen-image
-nix build .#fluentbit-image
-nix build .#clickhouse-image
-nix build .#hyperdx-image
-```
-
-### Load Images into Docker
-
-```bash
+# Load images into Docker
 nix run .#load-images
 ```
 
@@ -130,7 +245,7 @@ nix run .#test-race
 nix flake check
 ```
 
-### Run Locally
+### Run loggen Locally
 
 ```bash
 # Run the loggen application directly
@@ -139,6 +254,108 @@ nix run .#loggen -- --max-number 50 --num-strings 5 --sleep-duration 2s
 # Or with environment variables
 LOGGEN_MAX_NUMBER=50 LOGGEN_NUM_STRINGS=5 nix run .#loggen
 ```
+
+## Docker Compose (Local Development)
+
+For faster iteration without a MicroVM, use Docker Compose directly on your host. Nix generates the `docker-compose.yaml` with configuration from `nix/ports.nix`.
+
+### Quick Start
+
+```bash
+# Start the stack
+nix run .#compose-up
+
+# View logs
+nix run .#compose-logs
+
+# Check status
+nix run .#compose-ps
+
+# Stop the stack
+nix run .#compose-down
+```
+
+### Access Points
+
+| Service | URL |
+|---------|-----|
+| **HyperDX UI** | http://localhost:38080 |
+| **HyperDX API** | http://localhost:38000 |
+| **ClickHouse HTTP** | http://localhost:38123 |
+| **ClickHouse Native** | localhost:39000 |
+| **MongoDB** | localhost:37017 |
+
+### First-Time Setup
+
+HyperDX runs in local app mode (no login required). After starting the stack, run the setup script to configure the connection, source, and demo dashboard:
+
+```bash
+# Automated setup (creates connection, source, and dashboard)
+nix run .#compose-setup
+```
+
+This creates:
+- **Connection:** Default (http://clickhouse:8123)
+- **Source:** OTel Logs (default.otel_logs table)
+- **Dashboard:** Loggen Metrics with 4 charts:
+  - RandomString Distribution (table)
+  - RandomNumber Over Time (line chart)
+  - Avg RandomNumber by String (table)
+  - Log Count Over Time (line chart)
+
+Then open http://localhost:38080 and navigate to **Dashboards** → **Loggen Metrics**.
+
+<details>
+<summary>Manual Setup (alternative)</summary>
+
+If you prefer to configure manually:
+
+1. Open http://localhost:38080
+2. Go to **Team Settings** → **Connections** → **Add Connection**:
+   - **Name:** `Default`
+   - **Host:** `http://clickhouse:8123`
+   - **Username:** `default`
+   - **Password:** (leave empty)
+3. Go to **Team Settings** → **Sources** → **Add Source**:
+   - **Name:** `OTel Logs`
+   - **Connection:** `Default`
+   - **Database:** `default`
+   - **Table:** `otel_logs`
+   - **Timestamp:** `TimestampTime`
+   - **Body:** `Body`
+   - **Severity:** `SeverityText`
+   - **Service Name:** `ServiceName`
+4. Navigate to **Search** to view logs
+
+</details>
+
+### Verify Data Flow
+
+```bash
+# Check logs in ClickHouse
+curl 'http://localhost:38123/?query=SELECT%20count()%20FROM%20otel_logs'
+
+# View recent logs
+curl 'http://localhost:38123/?query=SELECT%20*%20FROM%20otel_logs%20ORDER%20BY%20Timestamp%20DESC%20LIMIT%205%20FORMAT%20Pretty'
+```
+
+### Architecture
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│   Loggen    │────▶│  FluentBit  │────▶│ ClickHouse  │◀────│   HyperDX   │
+│ (container) │     │ (fluentd    │     │ (container) │     │ (container) │
+│             │     │  driver)    │     │             │     │             │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+     JSON logs      Transform to OTel    Store logs         Query & visualize
+```
+
+### Notes
+
+- Uses official Docker images (ClickHouse, MongoDB, HyperDX) plus Nix-built loggen
+- Ports use `3XXXX` prefix to avoid conflicts with local services
+- Data persists in Docker volumes (`store_clickhouse-data`, `store_mongodb-data`)
+- FluentBit transforms logs via Lua script to OTel format
 
 ## Configuration
 
@@ -177,6 +394,15 @@ All ports are centralized in `nix/ports.nix`:
 | HyperDX API | 28000 |
 | HyperDX App | 28080 |
 
+**Docker Compose External Ports:**
+| Service | Port |
+|---------|------|
+| HyperDX App | 38080 |
+| HyperDX API | 38000 |
+| ClickHouse HTTP | 38123 |
+| ClickHouse Native | 39000 |
+| MongoDB | 37017 |
+
 ## Project Structure
 
 ```
@@ -191,6 +417,7 @@ clickhouse-otel-example/
 │   ├── namespace.yaml          # otel-demo namespace
 │   ├── loggen/                 # Loggen deployment
 │   ├── fluentbit/              # FluentBit DaemonSet + ConfigMap
+│   ├── otel-collector/         # OTel Collector DaemonSet (OTLP + filelog)
 │   ├── clickhouse/             # ClickHouse StatefulSet + init SQL
 │   ├── mongodb/                # MongoDB StatefulSet (default backend)
 │   ├── ferretdb/               # FerretDB StatefulSet (alternative, lightweight)
@@ -207,6 +434,7 @@ clickhouse-otel-example/
 │   │   ├── init.nix            # init-clickhouse
 │   │   ├── break-fix.nix       # break-*/fix-* pairs
 │   │   ├── latency.nix         # measure-latency scripts
+│   │   ├── integration.nix     # Deployment integration tests
 │   │   └── test-harness.nix    # test-verify-scripts
 │   ├── microvm/                # MicroVM configurations
 │   │   ├── default.nix         # Module entry point (variant selection)
@@ -220,6 +448,7 @@ clickhouse-otel-example/
 │   ├── fluentbit.nix           # FluentBit with custom config
 │   ├── hyperdx.nix             # HyperDX built from source
 │   ├── containers.nix          # OCI image definitions (uses lib/containers.nix)
+│   ├── docker-compose.nix      # Docker Compose generator
 │   ├── ports.nix               # Centralized port configuration
 │   └── devshell.nix            # Development environment
 ├── flake.nix                   # Nix flake
@@ -415,10 +644,20 @@ HyperDX is built from source using:
 - **tsconfig-paths/register** at runtime to resolve TypeScript path aliases (`@/*` → `build/src/*`)
 
 ### FluentBit Configuration
-FluentBit uses a Lua script (`nix/lua/transform.lua`) to transform JSON logs to OpenTelemetry format before sending to ClickHouse.
+FluentBit uses a Lua script (`nix/lua/transform.lua`) to transform JSON logs to OpenTelemetry format before sending to ClickHouse. Key features:
+- Kubernetes filter for pod metadata enrichment (labels, node name)
+- 2-second flush interval for batch efficiency
+- Async inserts (`async_insert=1`) for better ClickHouse throughput
+- Gzip compression for reduced network bandwidth
+- Dynamic service name extraction from K8s labels (`app`, `app.kubernetes.io/name`, `k8s-app`)
+- ObservedTimestamp tracking for pipeline latency measurement
 
 ### ClickHouse Schema
-The `otel_logs` table is compatible with HyperDX's expected schema, including proper timestamp handling and JSON body storage.
+The `otel_logs` table is compatible with HyperDX's expected schema, including proper timestamp handling and JSON body storage. Key features:
+- `ObservedTimestamp` column for pipeline latency measurement
+- MATERIALIZED columns: `ContainerName`, `PodName`, `NamespaceName`, `NodeName` (auto-extracted from ResourceAttributes)
+- Bloom filter indexes: `idx_trace_id`, `idx_container`, `idx_body`
+- Set indexes: `idx_severity`, `idx_service`, `idx_namespace`, `idx_random_string`
 
 ### ClickHouse Size Optimization
 
@@ -502,7 +741,7 @@ Measure end-to-end pipeline latency from log emission to ClickHouse availability
 | `nix run .#measure-latency` | Passive: analyze age of recent logs |
 | `nix run .#measure-latency-active` | Active: wait for new logs and measure |
 
-**Expected latency: 6-11 seconds** (FluentBit refresh: 5s, flush: 1s)
+**Expected latency: 6-12 seconds** (FluentBit refresh: 5s, flush: 2s)
 
 ### Sample Output
 
@@ -527,7 +766,7 @@ The latency includes:
 1. Container runtime writing log to file
 2. FluentBit tail refresh interval (configured: 5s)
 3. FluentBit processing (Lua transformation)
-4. FluentBit flush interval (configured: 1s)
+4. FluentBit flush interval (configured: 2s)
 5. Network transfer to ClickHouse
 6. ClickHouse write and indexing
 
@@ -593,6 +832,82 @@ This will:
 | `break-hyperdx` | Scales deployment to 0 | "Pod not running" |
 
 ## Integration Testing
+
+### Automated Deployment Tests
+
+The project includes comprehensive integration tests for all three deployment methods. All tests are passing:
+
+```bash
+# Run all deployment tests
+nix run .#test-all-deployments
+```
+
+**Test Results:**
+```
+==============================================
+All Deployment Tests Summary
+==============================================
+
+  Passed: 3/3
+  Failed: 0/3
+
+[PASS] All tests passed!
+```
+
+#### Individual Test Commands
+
+| Command | Description | What It Tests |
+|---------|-------------|---------------|
+| `nix run .#test-docker-compose` | Docker Compose stack | Container startup, log pipeline, FluentBit → ClickHouse |
+| `nix run .#test-minikube` | Minikube Kubernetes | Full K8s deployment, all 3 logging pipelines, latency comparison |
+| `nix run .#test-microvm` | MicroVM with Minikube | VM boot, SSH access, Minikube inside VM, pod deployment |
+
+#### Test Coverage
+
+**Docker Compose Test (8 checks):**
+- Stack startup and readiness
+- All containers running (clickhouse, fluentbit, loggen, hyperdx, mongodb)
+- Log pipeline verification (logs flowing to ClickHouse)
+- FluentBit pipeline log count
+
+**Minikube Test (9 checks):**
+- Minikube cluster startup
+- Image loading into Minikube
+- K8s manifest deployment
+- Pod readiness (ClickHouse, Loggen, HyperDX)
+- All three logging pipelines:
+  - FluentBit+Lua pipeline
+  - OTLP direct pipeline
+  - Collector filelog pipeline
+- Latency comparison by pipeline
+
+**MicroVM Test (4 checks):**
+- VM boot and SSH accessibility
+- Minikube running inside VM
+- Pod deployment (4+ pods running)
+- Log flow to ClickHouse
+
+#### Three-Method Logging Pipeline
+
+The minikube test verifies all three logging methods with latency comparison:
+
+```
+┌─pipeline──┬─log_count─┬─avg_latency_ms─┬─min_latency_ms─┬─max_latency_ms─┐
+│ filelog   │        10 │            940 │            929 │            953 │
+│ otlp      │         9 │           1959 │           1949 │           1971 │
+│ fluentbit │        18 │           6266 │            415 │          29483 │
+└───────────┴───────────┴────────────────┴────────────────┴────────────────┘
+```
+
+| Method | Path | Avg Latency |
+|--------|------|-------------|
+| Filelog | stdout → OTel Collector filelog → ClickHouse | ~1s |
+| OTLP Direct | OTel SDK → Collector → ClickHouse | ~2s |
+| FluentBit+Lua | stdout → FluentBit → ClickHouse | ~6s |
+
+See [`docs/LOGGING_PIPELINE.md`](docs/LOGGING_PIPELINE.md) for detailed documentation of all three logging pipelines.
+
+---
 
 ### Verified Components
 

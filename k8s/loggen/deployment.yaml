@@ -30,6 +30,9 @@ spec:
               value: "5s"
             - name: LOGGEN_HEALTH_PORT
               value: "8081"
+            # OTel SDK endpoint for Method 2 (OTLP direct)
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "otel-collector.otel-demo.svc.cluster.local:4318"
           ports:
             - name: health
               containerPort: 8081

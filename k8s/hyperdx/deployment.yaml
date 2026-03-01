@@ -37,12 +37,12 @@ spec:
             # Disable authentication for demo
             - name: HYPERDX_AUTH_DISABLED
               value: "true"
-            # Frontend URL for redirects after login (set to minikube NodePort)
+            # Frontend URL for redirects after login (localhost for host access via port forward)
             - name: FRONTEND_URL
-              value: "http://192.168.49.2:30808"
+              value: "http://localhost:30808"
             # API URL for frontend
             - name: NEXT_PUBLIC_API_URL
-              value: "http://192.168.49.2:30800"
+              value: "http://localhost:30800"
             # Auto-provision ClickHouse connection for new teams
             - name: DEFAULT_CONNECTIONS
               value: '[{"name":"Default","host":"http://clickhouse.otel-demo.svc.cluster.local:8123","username":"default","password":""}]'

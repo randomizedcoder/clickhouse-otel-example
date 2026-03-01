@@ -14,6 +14,16 @@
 
 { config, lib, pkgs, images, packages, k8sManifests, ... }:
 
+let
+  microvmLib = import ../../lib/microvm.nix { inherit lib pkgs; };
+  loadImagesScript = microvmLib.mkLoadImagesScript {
+    variant = "minikube";
+    inherit packages pkgs;
+  };
+
+  # Common environment for minikube commands
+  minikubeEnv = { HOME = "/root"; };
+in
 {
   # Enable Docker for Minikube
   virtualisation.docker = {
@@ -34,21 +44,13 @@
   ]);
 
   # Start Minikube
-  systemd.services.minikube-start = {
+  systemd.services.minikube-start = microvmLib.mkOneshotService {
     description = "Start Minikube Kubernetes Cluster";
     after = [ "docker.service" "network-online.target" ];
     wants = [ "network-online.target" ];
-    wantedBy = [ "multi-user.target" ];
-
     path = [ pkgs.docker ];
-
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      User = "root";
-      Environment = "HOME=/root";
-      ExecStartPre = "${pkgs.coreutils}/bin/sleep 5"; # Wait for docker
-    };
+    environment = minikubeEnv;
+    preStart = "${pkgs.coreutils}/bin/sleep 5"; # Wait for docker
 
     script = ''
       # Check if minikube is already running
@@ -65,27 +67,15 @@
         --force \
         --wait=all
     '';
-
-    preStop = ''
-      ${pkgs.minikube}/bin/minikube stop || true
-    '';
   };
 
   # Load container images into Minikube
-  systemd.services.load-images = {
+  systemd.services.load-images = microvmLib.mkOneshotService {
     description = "Load OCI images into Minikube";
     after = [ "minikube-start.service" ];
     requires = [ "minikube-start.service" ];
-    wantedBy = [ "multi-user.target" ];
-
     path = [ pkgs.docker ];
-
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      User = "root";
-      Environment = "HOME=/root";
-    };
+    environment = minikubeEnv;
 
     script = ''
       set -e
@@ -94,21 +84,7 @@
       ${pkgs.minikube}/bin/minikube status || exit 1
 
       echo "Loading container images into Minikube..."
-
-      echo "Loading loggen..."
-      ${pkgs.minikube}/bin/minikube image load ${packages.loggen-image}
-
-      echo "Loading fluentbit..."
-      ${pkgs.minikube}/bin/minikube image load ${packages.fluentbit-image}
-
-      echo "Loading clickhouse..."
-      ${pkgs.minikube}/bin/minikube image load ${packages.clickhouse-image}
-
-      echo "Loading mongodb..."
-      ${pkgs.minikube}/bin/minikube image load ${packages.mongodb-image}
-
-      echo "Loading hyperdx..."
-      ${pkgs.minikube}/bin/minikube image load ${packages.hyperdx-image}
+      ${loadImagesScript}
 
       echo "All images loaded. Verifying..."
       ${pkgs.minikube}/bin/minikube image ls
@@ -116,18 +92,11 @@
   };
 
   # Deploy Kubernetes manifests
-  systemd.services.deploy-manifests = {
+  systemd.services.deploy-manifests = microvmLib.mkOneshotService {
     description = "Deploy Kubernetes manifests";
     after = [ "load-images.service" ];
     requires = [ "load-images.service" ];
-    wantedBy = [ "multi-user.target" ];
-
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      User = "root";
-      Environment = "HOME=/root";
-    };
+    environment = minikubeEnv;
 
     script = ''
       set -e
@@ -147,21 +116,12 @@
   };
 
   # Minikube tunnel service to expose NodePorts on VM localhost
-  systemd.services.minikube-tunnel = {
+  systemd.services.minikube-tunnel = microvmLib.mkSimpleService {
     description = "Minikube Tunnel for NodePort Access";
     after = [ "deploy-manifests.service" ];
     requires = [ "deploy-manifests.service" ];
-    wantedBy = [ "multi-user.target" ];
-
     path = [ pkgs.docker ];
-
-    serviceConfig = {
-      Type = "simple";
-      User = "root";
-      Environment = "HOME=/root";
-      ExecStart = "${pkgs.minikube}/bin/minikube tunnel --cleanup=true";
-      Restart = "on-failure";
-      RestartSec = "10s";
-    };
+    environment = minikubeEnv;
+    execStart = "${pkgs.minikube}/bin/minikube tunnel --cleanup=true";
   };
 }

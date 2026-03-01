@@ -2,7 +2,6 @@ package loop
 
 import (
 	"context"
-	"math/rand/v2"
 	"testing"
 	"time"
 
@@ -156,30 +155,6 @@ func TestLooper_Run_Cancellation(t *testing.T) {
 	}
 }
 
-func TestLooper_Deterministic(t *testing.T) {
-	cfg := &config.Config{MaxNumber: 100, NumStrings: 10}
-	logger := zaptest.NewLogger(t)
-
-	// Create two loopers with the same seed
-	seed1, seed2 := uint64(12345), uint64(67890)
-	rng1 := rand.New(rand.NewPCG(seed1, seed2))
-	rng2 := rand.New(rand.NewPCG(seed1, seed2))
-
-	l1 := NewWithRng(cfg, logger, rng1)
-	l2 := NewWithRng(cfg, logger, rng2)
-
-	// They should produce the same sequence
-	for i := 0; i < 100; i++ {
-		n1 := l1.RandomNumber()
-		n2 := l2.RandomNumber()
-		if n1 != n2 {
-			t.Errorf("Iteration %d: RandomNumber() = %d, %d (should be same)", i, n1, n2)
-		}
-
-		s1 := l1.RandomString()
-		s2 := l2.RandomString()
-		if s1 != s2 {
-			t.Errorf("Iteration %d: RandomString() = %q, %q (should be same)", i, s1, s2)
-		}
-	}
-}
+// Note: Deterministic tests are not possible with crypto/rand.
+// The crypto/rand package is designed to be unpredictable by design.
+// Tests verify statistical properties (range, distribution) instead.

@@ -37,10 +37,19 @@ loggen
 # Nix build results
 result
 result-*
+result/
 
-# MicroVM images
+# Nix direnv cache
+.direnv/
+
+# Nix flake lock backup
+flake.lock.backup
+
+# MicroVM images and state
 *.img
 *.qcow2
+control.sock
+var.img
 
 # Container image tarballs
 *.tar.gz

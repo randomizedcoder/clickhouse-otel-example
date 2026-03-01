@@ -2,7 +2,7 @@
 { pkgs, shellLib }:
 let
   inherit (pkgs) lib;
-  inherit (shellLib) namespace commonFunctions;
+  inherit (shellLib) namespace mkBreakScript mkFixScript;
 
   # Define break/fix pairs declaratively
   breakFixPairs = {
@@ -33,13 +33,13 @@ let
         kubectl -n ${namespace} patch configmap/fluentbit-config \
           --type=merge -p '{"data":{"transform.lua":"syntax error here!!!"}}'
 
-        print_info "Restarting FluentBit DaemonSet..."
+        echo "Restarting FluentBit DaemonSet..."
         kubectl -n ${namespace} rollout restart daemonset/fluentbit
       '';
       fixAction = ''
         kubectl apply -k k8s/fluentbit/ || kubectl apply -f k8s/fluentbit/
 
-        print_info "Restarting FluentBit DaemonSet..."
+        echo "Restarting FluentBit DaemonSet..."
         kubectl -n ${namespace} rollout restart daemonset/fluentbit
       '';
       waitAction = "kubectl -n ${namespace} rollout status daemonset/fluentbit --timeout=120s";
@@ -53,13 +53,13 @@ let
         kubectl -n ${namespace} patch configmap/fluentbit-config \
           --type=merge -p '{"data":{"outputs.conf":"[OUTPUT]\n    Name          http\n    Match         *\n    Host          wrong-host-that-does-not-exist\n    Port          8123\n    URI           /?query=INSERT%20INTO%20otel_logs%20FORMAT%20JSONEachRow\n    Format        json_lines\n    Retry_Limit   5\n"}}'
 
-        print_info "Restarting FluentBit DaemonSet..."
+        echo "Restarting FluentBit DaemonSet..."
         kubectl -n ${namespace} rollout restart daemonset/fluentbit
       '';
       fixAction = ''
         kubectl apply -k k8s/fluentbit/ || kubectl apply -f k8s/fluentbit/
 
-        print_info "Restarting FluentBit DaemonSet..."
+        echo "Restarting FluentBit DaemonSet..."
         kubectl -n ${namespace} rollout restart daemonset/fluentbit
       '';
       waitAction = "kubectl -n ${namespace} rollout status daemonset/fluentbit --timeout=120s";
@@ -87,14 +87,14 @@ let
         INIT_SQL=$(kubectl -n ${namespace} get configmap clickhouse-init -o jsonpath='{.data.init\.sql}' 2>/dev/null || echo "")
         if [ -n "$INIT_SQL" ]; then
           echo "$INIT_SQL" | kubectl -n ${namespace} exec -i sts/clickhouse -- clickhouse-client
-          print_pass "otel_logs table recreated from ConfigMap"
+          echo "otel_logs table recreated from ConfigMap"
         else
-          print_warn "Could not find init.sql in ConfigMap, trying local file..."
+          echo "Could not find init.sql in ConfigMap, trying local file..."
           if [ -f k8s/clickhouse/init.sql ]; then
             kubectl -n ${namespace} exec -i sts/clickhouse -- clickhouse-client < k8s/clickhouse/init.sql
-            print_pass "otel_logs table recreated from local file"
+            echo "otel_logs table recreated from local file"
           else
-            print_fail "Could not find init.sql"
+            echo "Could not find init.sql"
             exit 1
           fi
         fi
@@ -114,51 +114,26 @@ let
     };
   };
 
-  # Generate break scripts
+  # Generate break scripts using mkBreakScript helper
   breakScripts = lib.mapAttrs'
     (name: cfg: {
       name = "break-${name}";
-      value = pkgs.writeShellApplication {
+      value = mkBreakScript {
         name = "break-${name}";
-        runtimeInputs = [ pkgs.kubectl ];
-        text = ''
-          ${commonFunctions}
-
-          print_header "Breaking ${cfg.description}"
-          print_info "Injecting failure..."
-
-          ${cfg.breakAction}
-
-          print_pass "${cfg.description} broken"
-          echo "  Run '${cfg.verifyCmd}' to verify failure detection"
-          echo "  Run '${cfg.fixCmd}' to restore"
-        '';
+        inherit (cfg) description breakAction;
+        verifyCmd = cfg.verifyCmd;
+        fixCmd = cfg.fixCmd;
       };
     })
     breakFixPairs;
 
-  # Generate fix scripts
+  # Generate fix scripts using mkFixScript helper
   fixScripts = lib.mapAttrs'
     (name: cfg: {
       name = "fix-${name}";
-      value = pkgs.writeShellApplication {
+      value = mkFixScript {
         name = "fix-${name}";
-        runtimeInputs = [ pkgs.kubectl ];
-        text = ''
-          ${commonFunctions}
-
-          print_header "Fixing ${cfg.description}"
-          print_info "Restoring..."
-
-          ${cfg.fixAction}
-
-          ${lib.optionalString (cfg.waitAction != null) ''
-          print_info "Waiting for recovery..."
-          ${cfg.waitAction}
-          ''}
-
-          print_pass "${cfg.description} restored"
-        '';
+        inherit (cfg) description fixAction waitAction;
       };
     })
     breakFixPairs;

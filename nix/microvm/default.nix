@@ -27,19 +27,18 @@ let
   # Access flake packages for this system
   packages = self.packages.x86_64-linux;
 
-  # Copy k8s manifests to a derivation (only for k8s variants)
+  # Generate k8s manifests with configuration from ports.nix
+  # This replaces static YAML files with Nix-generated ones for consistency
   k8sManifests = if k8sManifestsPath != null then
-    pkgs.runCommand "k8s-manifests" { } ''
-      mkdir -p $out
-      cp -r ${k8sManifestsPath}/* $out/
-    ''
+    import ../k8s { inherit lib pkgs; k8sStaticPath = k8sManifestsPath; }
   else null;
 
   # Resource allocation per variant
+  # Disk sizes in MB: minikube needs more space for container images + data
   resources = {
     docker = { mem = 4096; vcpu = 2; disk = 15360; };
     k3s = { mem = 6144; vcpu = 3; disk = 15360; };
-    minikube = { mem = 8192; vcpu = 4; disk = 20480; };
+    minikube = { mem = 8192; vcpu = 4; disk = 40960; };  # 40GB for minikube + images
   };
 
   # Select resources for this variant

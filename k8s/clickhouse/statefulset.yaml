@@ -22,6 +22,32 @@ spec:
         - name: clickhouse
           image: clickhouse:latest
           imagePullPolicy: Never
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Start ClickHouse server in background
+              clickhouse-server --config-file=/etc/clickhouse-server/config.xml &
+              CH_PID=$!
+
+              # Wait for ClickHouse to be ready (max 60 seconds)
+              echo "Waiting for ClickHouse to be ready..."
+              for i in $(seq 1 60); do
+                if clickhouse-client --query "SELECT 1" >/dev/null 2>&1; then
+                  echo "ClickHouse is ready"
+                  break
+                fi
+                sleep 1
+              done
+
+              # Run init SQL if tables don't exist
+              if [ -f /docker-entrypoint-initdb.d/init.sql ]; then
+                echo "Running init SQL..."
+                clickhouse-client --multiquery < /docker-entrypoint-initdb.d/init.sql || echo "Init SQL completed (may have already existed)"
+              fi
+
+              # Wait for ClickHouse process
+              wait $CH_PID
           ports:
             - name: http
               containerPort: 8123
@@ -36,7 +62,7 @@ spec:
             httpGet:
               path: /ping
               port: http
-            initialDelaySeconds: 30
+            initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
@@ -44,7 +70,7 @@ spec:
             httpGet:
               path: /ping
               port: http
-            initialDelaySeconds: 10
+            initialDelaySeconds: 30
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3

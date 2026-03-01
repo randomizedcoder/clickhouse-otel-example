@@ -11,6 +11,9 @@
 
 { config, lib, pkgs, images, loadImagesScript, ... }:
 
+let
+  microvmLib = import ../../lib/microvm.nix { inherit lib pkgs; };
+in
 {
   # Enable Docker
   virtualisation.docker = {
@@ -28,35 +31,19 @@
   ]);
 
   # Load container images into Docker
-  systemd.services.load-images = {
+  systemd.services.load-images = microvmLib.mkOneshotService {
     description = "Load OCI images into Docker";
     after = [ "docker.service" ];
     requires = [ "docker.service" ];
-    wantedBy = [ "multi-user.target" ];
-
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      User = "root";
-    };
-
     script = loadImagesScript;
   };
 
   # Docker Compose service
   # TODO: Phase 2 will generate docker-compose.yaml from Nix
-  systemd.services.otel-demo = {
+  systemd.services.otel-demo = microvmLib.mkOneshotService {
     description = "OTel Demo Stack (Docker Compose)";
     after = [ "load-images.service" ];
     requires = [ "load-images.service" ];
-    wantedBy = [ "multi-user.target" ];
-
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      User = "root";
-      WorkingDirectory = "/etc/otel-demo";
-    };
 
     # Placeholder - will be implemented in Phase 2
     script = ''

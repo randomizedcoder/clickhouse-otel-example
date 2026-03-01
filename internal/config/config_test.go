@@ -1,17 +1,16 @@
 package config
 
 import (
-	"os"
 	"testing"
 	"time"
 )
 
 func TestLoadWithDefaults(t *testing.T) {
 	// Clear any env vars that might interfere
-	os.Unsetenv("LOGGEN_MAX_NUMBER")
-	os.Unsetenv("LOGGEN_NUM_STRINGS")
-	os.Unsetenv("LOGGEN_SLEEP_DURATION")
-	os.Unsetenv("LOGGEN_HEALTH_PORT")
+	t.Setenv("LOGGEN_MAX_NUMBER", "")
+	t.Setenv("LOGGEN_NUM_STRINGS", "")
+	t.Setenv("LOGGEN_SLEEP_DURATION", "")
+	t.Setenv("LOGGEN_HEALTH_PORT", "")
 
 	cfg := LoadWithDefaults()
 
@@ -104,15 +103,14 @@ func TestEnvOverrides(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Clear all env vars
-			os.Unsetenv("LOGGEN_MAX_NUMBER")
-			os.Unsetenv("LOGGEN_NUM_STRINGS")
-			os.Unsetenv("LOGGEN_SLEEP_DURATION")
-			os.Unsetenv("LOGGEN_HEALTH_PORT")
+			// Clear all env vars (t.Setenv auto-restores after test)
+			t.Setenv("LOGGEN_MAX_NUMBER", "")
+			t.Setenv("LOGGEN_NUM_STRINGS", "")
+			t.Setenv("LOGGEN_SLEEP_DURATION", "")
+			t.Setenv("LOGGEN_HEALTH_PORT", "")
 
 			// Set the test env var
-			os.Setenv(tt.envKey, tt.envValue)
-			defer os.Unsetenv(tt.envKey)
+			t.Setenv(tt.envKey, tt.envValue)
 
 			cfg := LoadWithDefaults()
 

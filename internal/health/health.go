@@ -80,8 +80,13 @@ func (s *Server) IsReady() bool {
 	return s.ready.Load()
 }
 
+// isAllowedMethod checks if the request method is GET or HEAD.
+func isAllowedMethod(r *http.Request) bool {
+	return r.Method == http.MethodGet || r.Method == http.MethodHead
+}
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+	if !isAllowedMethod(r) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -94,7 +99,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+	if !isAllowedMethod(r) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}

@@ -2,6 +2,10 @@
 # All ports are defined here to ensure consistency across containers, K8s, and MicroVM
 {
   # ============================================
+  # Host Configuration (for external URLs)
+  # ============================================
+  externalHost = "localhost"; # Host used for browser access
+  # ============================================
   # Service Ports (inside containers/pods)
   # ============================================
   services = {
@@ -50,5 +54,17 @@
   nodePorts = {
     hyperdxApi = 30800;
     hyperdxApp = 30808;
+  };
+
+  # ============================================
+  # Docker Compose External Ports
+  # Using 3XXXX prefix to avoid conflicts with local services
+  # ============================================
+  compose = {
+    hyperdxApi = 38000;
+    hyperdxApp = 38080;
+    mongodb = 37017;
+    clickhouseHttp = 38123;
+    clickhouseNative = 39000;
   };
 }

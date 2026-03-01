@@ -22,7 +22,7 @@ func TestServer_HealthEndpoint(t *testing.T) {
 	s.handleHealth(w, req)
 
 	resp := w.Result()
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleHealth() status = %d, want %d", resp.StatusCode, http.StatusOK)
@@ -174,11 +174,15 @@ func TestServer_StartAndShutdown(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Test that we can connect
-	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/health", port))
-	if err != nil {
-		t.Fatalf("Failed to connect to health server: %v", err)
+	req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://localhost:%d/health", port), nil)
+	if reqErr != nil {
+		t.Fatalf("Failed to create request: %v", reqErr)
 	}
-	resp.Body.Close()
+	resp, respErr := http.DefaultClient.Do(req)
+	if respErr != nil {
+		t.Fatalf("Failed to connect to health server: %v", respErr)
+	}
+	_ = resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("GET /health status = %d, want %d", resp.StatusCode, http.StatusOK)
@@ -188,15 +192,15 @@ func TestServer_StartAndShutdown(t *testing.T) {
 	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	if err := s.Shutdown(shutdownCtx); err != nil {
-		t.Errorf("Shutdown() error = %v", err)
+	if shutdownErr := s.Shutdown(shutdownCtx); shutdownErr != nil {
+		t.Errorf("Shutdown() error = %v", shutdownErr)
 	}
 
 	// Server should have stopped without error
 	select {
-	case err := <-errChan:
-		if err != nil {
-			t.Errorf("Start() returned error: %v", err)
+	case startErr := <-errChan:
+		if startErr != nil {
+			t.Errorf("Start() returned error: %v", startErr)
 		}
 	case <-time.After(time.Second):
 		t.Error("Server did not stop after shutdown")

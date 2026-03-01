@@ -11,6 +11,11 @@
   };
 
   outputs = { self, nixpkgs, flake-utils, microvm }:
+    let
+      # MicroVM variants - defined once, used everywhere
+      microvmVariants = [ "docker" "k3s" "minikube" ];
+      microvmNames = map (v: "microvm-${v}") microvmVariants;
+    in
     flake-utils.lib.eachDefaultSystem
       (system:
         let
@@ -53,45 +58,24 @@
             clickhouse = clickhouseMinimal;
           };
 
+          # Docker Compose generator (for running without MicroVM)
+          compose = import ./nix/docker-compose.nix {
+            lib = pkgs.lib;
+            inherit pkgs;
+            inherit (pkgs) writeText;
+          };
+
+          # Minikube lifecycle management
+          minikube = import ./nix/minikube.nix {
+            inherit pkgs;
+            lib = pkgs.lib;
+          };
+
           # Verification scripts (modular)
           verify = pkgs.callPackage ./nix/verify { };
 
-          # Import app helpers
-          appsLib = import ./nix/lib/apps.nix { inherit (pkgs) lib; };
-
-          # All verify script names for genAttrs
-          verifyScriptNames = [
-            # Positive verification
-            "verify-loggen"
-            "verify-fluentbit"
-            "verify-fluentbit-output"
-            "verify-clickhouse"
-            "verify-hyperdx"
-            "verify-pipeline"
-            # Initialization
-            "init-clickhouse"
-            # Break scripts
-            "break-loggen"
-            "break-fluentbit"
-            "break-fluentbit-lua"
-            "break-fluentbit-output"
-            "break-clickhouse"
-            "break-clickhouse-table"
-            "break-hyperdx"
-            # Fix scripts
-            "fix-loggen"
-            "fix-fluentbit"
-            "fix-fluentbit-lua"
-            "fix-fluentbit-output"
-            "fix-clickhouse"
-            "fix-clickhouse-table"
-            "fix-hyperdx"
-            # Latency measurement
-            "measure-latency"
-            "measure-latency-active"
-            # Test harness
-            "test-verify-scripts"
-          ];
+          # Auto-discover verify script names
+          verifyScriptNames = verify._scriptNames;
 
           # Generate verify apps using genAttrs
           verifyApps = pkgs.lib.genAttrs verifyScriptNames (name: {
@@ -103,17 +87,9 @@
         {
           # Packages
           packages = {
-            # Go application binary
             loggen = goApp;
-
-            # FluentBit binary
             fluentbit = fluentbit;
-
-            # ClickHouse minimal build (smaller binary for OTEL pipeline)
-            # See docs/CLICKHOUSE_SIZE_OPTIMIZATION.md
             clickhouse-minimal = clickhouseMinimal;
-
-            # HyperDX
             hyperdx = hyperdx;
 
             # OCI container images
@@ -124,180 +100,354 @@
             mongodb-image = containers.mongodbImage;
             ferretdb-image = containers.ferretdbImage;
             hyperdx-image = containers.hyperdxImage;
-
-            # All images bundled
             all-images = containers.allImages;
 
-            # Default package
             default = goApp;
           };
 
-          # Development shell
-          devShells.default = pkgs.callPackage ./nix/devshell.nix { };
+          devShells.default = pkgs.callPackage ./nix/devshell.nix {
+            inherit verifyScriptNames;
+          };
 
-          # Formatter for `nix fmt`
           formatter = pkgs.nixpkgs-fmt;
 
           # Apps for running
           apps = {
-            # Core apps
             loggen = {
               type = "app";
               program = "${goApp}/bin/loggen";
             };
 
+            # Go development apps (using writeShellApplication for shellcheck)
+            build = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "build";
+                runtimeInputs = [ pkgs.go_1_26 ];
+                text = ''
+                  cd ${self}
+                  go build -v ./...
+                '';
+              }}/bin/build";
+            };
+
             test = {
               type = "app";
-              program = toString (pkgs.writeShellScript "test" ''
-                set -e
-                cd ${self}
-                ${pkgs.go}/bin/go test -v ./...
-              '');
+              program = "${pkgs.writeShellApplication {
+                name = "test";
+                runtimeInputs = [ pkgs.go_1_26 ];
+                text = ''
+                  cd ${self}
+                  go test -v ./...
+                '';
+              }}/bin/test";
             };
 
             test-race = {
               type = "app";
-              program = toString (pkgs.writeShellScript "test-race" ''
-                set -e
-                cd ${self}
-                CGO_ENABLED=1 ${pkgs.go}/bin/go test -race -v ./...
-              '');
+              program = "${pkgs.writeShellApplication {
+                name = "test-race";
+                runtimeInputs = [ pkgs.go_1_26 ];
+                text = ''
+                  cd ${self}
+                  CGO_ENABLED=1 go test -race -v ./...
+                '';
+              }}/bin/test-race";
+            };
+
+            vet = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "vet";
+                runtimeInputs = [ pkgs.go_1_26 ];
+                text = ''
+                  cd ${self}
+                  go vet ./...
+                '';
+              }}/bin/vet";
+            };
+
+            # Tiered linting (quick -> standard -> comprehensive)
+            lint-quick = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "lint-quick";
+                runtimeInputs = [ pkgs.go_1_26 pkgs.golangci-lint ];
+                text = ''
+                  cd ${self}
+                  golangci-lint run --config .golangci-quick.yml --timeout 60s ./...
+                '';
+              }}/bin/lint-quick";
+            };
+
+            lint = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "lint";
+                runtimeInputs = [ pkgs.go_1_26 pkgs.golangci-lint ];
+                text = ''
+                  cd ${self}
+                  golangci-lint run --config .golangci.yml --timeout 5m ./...
+                '';
+              }}/bin/lint";
+            };
+
+            lint-comprehensive = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "lint-comprehensive";
+                runtimeInputs = [ pkgs.go_1_26 pkgs.golangci-lint ];
+                text = ''
+                  cd ${self}
+                  golangci-lint run --config .golangci-comprehensive.yml --timeout 15m ./...
+                '';
+              }}/bin/lint-comprehensive";
+            };
+
+            # Security scanning
+            sec = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "sec";
+                runtimeInputs = [ pkgs.go_1_26 pkgs.gosec ];
+                text = ''
+                  cd ${self}
+                  gosec -exclude=G115 -fmt=text ./...
+                '';
+              }}/bin/sec";
             };
 
             load-images = {
               type = "app";
               program = "${containers.loadScript}";
             };
-          } // verifyApps // (if system == "x86_64-linux" then {
-            # MicroVM runners (x86_64-linux only)
-            microvm-docker = {
-              type = "app";
-              program = toString (
-                self.nixosConfigurations.microvm-docker.config.microvm.declaredRunner
-              );
-            };
-            microvm-k3s = {
-              type = "app";
-              program = toString (
-                self.nixosConfigurations.microvm-k3s.config.microvm.declaredRunner
-              );
-            };
-            microvm-minikube = {
-              type = "app";
-              program = toString (
-                self.nixosConfigurations.microvm-minikube.config.microvm.declaredRunner
-              );
-            };
-            microvm = {
-              type = "app";
-              program = toString (
-                self.nixosConfigurations.microvm.config.microvm.declaredRunner
-              );
-            };
-          } else { });
 
-          # Checks for CI
-          checks = {
-            # Go tests
-            go-test = pkgs.runCommand "go-test"
-              {
-                nativeBuildInputs = [ pkgs.go ];
-                src = self;
-              } ''
-              export HOME=$TMPDIR
-              export GOCACHE=$TMPDIR/go-cache
-              cd $src
-              go test -v ./...
-              touch $out
-            '';
+            # Docker Compose apps (run stack without MicroVM)
+            compose-up = {
+              type = "app";
+              program = "${compose.composeUp}/bin/compose-up";
+            };
 
-            # Go lint
-            go-lint = pkgs.runCommand "go-lint"
-              {
-                nativeBuildInputs = [ pkgs.go pkgs.golangci-lint ];
-                src = self;
-              } ''
-              export HOME=$TMPDIR
-              export GOCACHE=$TMPDIR/go-cache
-              export GOLANGCI_LINT_CACHE=$TMPDIR/lint-cache
-              cd $src
-              golangci-lint run ./...
-              touch $out
-            '';
+            compose-down = {
+              type = "app";
+              program = "${compose.composeDown}/bin/compose-down";
+            };
 
-            # Nix formatting
-            nix-fmt = pkgs.runCommand "nix-fmt"
-              {
-                nativeBuildInputs = [ pkgs.nixpkgs-fmt ];
-                src = self;
-              } ''
-              nixpkgs-fmt --check $src/*.nix $src/nix/*.nix $src/nix/lib/*.nix $src/nix/verify/*.nix
-              touch $out
-            '';
-          };
+            compose-logs = {
+              type = "app";
+              program = "${compose.composeLogs}/bin/compose-logs";
+            };
+
+            compose-ps = {
+              type = "app";
+              program = "${compose.composePs}/bin/compose-ps";
+            };
+
+            compose-setup = {
+              type = "app";
+              program = "${compose.composeSetup}/bin/compose-setup";
+            };
+
+            compose-force-stop = {
+              type = "app";
+              program = "${compose.composeForceStop}/bin/compose-force-stop";
+            };
+
+            # Minikube lifecycle apps
+            minikube-up = {
+              type = "app";
+              program = "${minikube.minikubeUp}/bin/minikube-up";
+            };
+
+            minikube-status = {
+              type = "app";
+              program = "${minikube.minikubeStatus}/bin/minikube-status";
+            };
+
+            minikube-logs = {
+              type = "app";
+              program = "${minikube.minikubeLogs}/bin/minikube-logs";
+            };
+
+            minikube-down = {
+              type = "app";
+              program = "${minikube.minikubeDown}/bin/minikube-down";
+            };
+
+            minikube-delete = {
+              type = "app";
+              program = "${minikube.minikubeDelete}/bin/minikube-delete";
+            };
+
+            # Convenience scripts for VM management (using writeShellApplication for shellcheck)
+            stop-vm = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "stop-vm";
+                runtimeInputs = [ pkgs.procps ];
+                text = ''
+                  echo "Stopping any running MicroVMs..."
+                  pkill -9 -f "qemu.*otel-demo" && echo "VMs stopped" || echo "No VMs running"
+                '';
+              }}/bin/stop-vm";
+            };
+
+            clean-vm = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "clean-vm";
+                runtimeInputs = [ pkgs.procps pkgs.coreutils ];
+                text = ''
+                  echo "Cleaning up MicroVM state..."
+                  pkill -9 -f "qemu.*otel-demo" || true
+                  rm -f var.img control.sock
+                  echo "Cleaned: var.img and control.sock removed"
+                  echo "Run 'nix run .#microvm' to start fresh"
+                '';
+              }}/bin/clean-vm";
+            };
+
+            # MicroVM help - show usage instructions after VM starts
+            microvm-help = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "microvm-help";
+                text = ''
+                  echo ""
+                  echo "=============================================="
+                  echo "  OTel Demo Stack (MicroVM + K3s)"
+                  echo "=============================================="
+                  echo ""
+                  echo "ACCESS POINTS:"
+                  echo "  HyperDX UI:      http://localhost:30808"
+                  echo "  HyperDX API:     http://localhost:30800"
+                  echo "  ClickHouse HTTP: http://localhost:28123"
+                  echo "  SSH:             ssh -p 22022 demo@localhost  (password: demo)"
+                  echo ""
+                  echo "VIEW LOGGEN LOGS:"
+                  echo "  # From host (via SSH)"
+                  echo "  ssh -p 22022 demo@localhost 'sudo k3s kubectl -n otel-demo logs -f deployment/loggen'"
+                  echo ""
+                  echo "  # Inside VM"
+                  echo "  sudo k3s kubectl -n otel-demo logs -f deployment/loggen"
+                  echo ""
+                  echo "QUERY CLICKHOUSE:"
+                  echo "  # From host (via HTTP API)"
+                  echo "  curl 'http://localhost:28123/?query=SELECT+count()+FROM+otel_logs'"
+                  echo ""
+                  echo "  # From host (via SSH)"
+                  echo "  ssh -p 22022 demo@localhost 'sudo k3s kubectl -n otel-demo exec -it sts/clickhouse -- \\"
+                  echo "    clickhouse-client --query \"SELECT count() FROM otel_logs\"'"
+                  echo ""
+                  echo "  # Inside VM - Interactive CLI"
+                  echo "  sudo k3s kubectl -n otel-demo exec -it sts/clickhouse -- clickhouse-client"
+                  echo ""
+                  echo "  # View recent logs"
+                  echo "  curl 'http://localhost:28123/?query=SELECT+*+FROM+otel_logs+ORDER+BY+Timestamp+DESC+LIMIT+5+FORMAT+Pretty'"
+                  echo ""
+                  echo "CHECK POD STATUS:"
+                  echo "  # From host"
+                  echo "  ssh -p 22022 demo@localhost 'sudo k3s kubectl -n otel-demo get pods'"
+                  echo ""
+                  echo "  # Inside VM"
+                  echo "  sudo k3s kubectl -n otel-demo get pods"
+                  echo ""
+                  echo "LIFECYCLE COMMANDS:"
+                  echo "  nix run .#microvm-status  - Check VM and pod status"
+                  echo "  nix run .#microvm-stop    - Graceful shutdown"
+                  echo "  nix run .#stop-vm         - Force kill VM process"
+                  echo "  nix run .#clean-vm        - Remove VM state files"
+                  echo ""
+                '';
+              }}/bin/microvm-help";
+            };
+
+            # MicroVM status check
+            microvm-status = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "microvm-status";
+                runtimeInputs = [ pkgs.openssh pkgs.procps ];
+                text = ''
+                  echo "=== MicroVM Status ==="
+
+                  if pgrep -f "qemu.*otel-demo" > /dev/null; then
+                    echo "VM Process: RUNNING"
+
+                    echo ""
+                    echo "Checking SSH connectivity..."
+                    if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p 22022 demo@localhost "echo 'SSH: OK'" 2>/dev/null; then
+                      echo ""
+                      echo "=== Pods inside VM ==="
+                      ssh -p 22022 demo@localhost "sudo k3s kubectl -n otel-demo get pods 2>/dev/null || sudo kubectl -n otel-demo get pods 2>/dev/null" || echo "(kubectl not accessible)"
+                    else
+                      echo "SSH: NOT READY (VM still booting?)"
+                    fi
+                  else
+                    echo "VM Process: NOT RUNNING"
+                    exit 1
+                  fi
+                '';
+              }}/bin/microvm-status";
+            };
+
+            # MicroVM graceful shutdown
+            microvm-stop = {
+              type = "app";
+              program = "${pkgs.writeShellApplication {
+                name = "microvm-stop";
+                runtimeInputs = [ pkgs.openssh pkgs.procps ];
+                text = ''
+                  echo "=== Graceful MicroVM Shutdown ==="
+
+                  if ssh -o ConnectTimeout=5 -o StrictHostKeyChecking=no -p 22022 root@localhost "poweroff" 2>/dev/null; then
+                    echo "Shutdown command sent. Waiting for VM to stop..."
+                    sleep 5
+
+                    if pgrep -f "qemu.*otel-demo" > /dev/null; then
+                      echo "VM still running. Use 'nix run .#stop-vm' to force kill."
+                    else
+                      echo "VM stopped gracefully."
+                    fi
+                  else
+                    echo "Could not connect to VM. It may not be running."
+                    echo "Use 'nix run .#stop-vm' to force kill any orphaned processes."
+                  fi
+                '';
+              }}/bin/microvm-stop";
+            };
+          } // verifyApps // (if system == "x86_64-linux" then
+          # MicroVM runners (x86_64-linux only)
+            pkgs.lib.genAttrs (microvmNames ++ [ "microvm" ])
+              (name: {
+                type = "app";
+                program = "${self.nixosConfigurations.${name}.config.microvm.declaredRunner}/bin/microvm-run";
+              })
+          else { });
+
+          checks = import ./nix/checks.nix { inherit self pkgs; };
         }
       ) // {
       # NixOS configurations (system-independent)
-      # MicroVM variants: docker (lowest resources), k3s (recommended), minikube (most compatible)
-      nixosConfigurations = {
-        # Docker variant: Direct Docker Compose (4GB RAM, 2 vCPUs)
-        microvm-docker = nixpkgs.lib.nixosSystem {
-          system = "x86_64-linux";
-          modules = [
-            microvm.nixosModules.microvm
-            (import ./nix/microvm { variant = "docker"; })
-          ];
-          specialArgs = {
-            inherit self;
-            k8sManifestsPath = ./k8s;
+      nixosConfigurations =
+        let
+          mkMicroVM = variant: nixpkgs.lib.nixosSystem {
+            system = "x86_64-linux";
+            modules = [
+              microvm.nixosModules.microvm
+              (import ./nix/microvm { inherit variant; })
+            ];
+            specialArgs = {
+              inherit self;
+              k8sManifestsPath = ./k8s;
+            };
           };
-        };
+        in
+        nixpkgs.lib.genAttrs microvmNames
+          (name: mkMicroVM (nixpkgs.lib.removePrefix "microvm-" name))
+        // { microvm = mkMicroVM "minikube"; }; # Legacy alias
 
-        # K3s variant: Lightweight Kubernetes (6GB RAM, 3 vCPUs) - Recommended
-        microvm-k3s = nixpkgs.lib.nixosSystem {
-          system = "x86_64-linux";
-          modules = [
-            microvm.nixosModules.microvm
-            (import ./nix/microvm { variant = "k3s"; })
-          ];
-          specialArgs = {
-            inherit self;
-            k8sManifestsPath = ./k8s;
-          };
-        };
-
-        # Minikube variant: Full Minikube (8GB RAM, 4 vCPUs)
-        microvm-minikube = nixpkgs.lib.nixosSystem {
-          system = "x86_64-linux";
-          modules = [
-            microvm.nixosModules.microvm
-            (import ./nix/microvm { variant = "minikube"; })
-          ];
-          specialArgs = {
-            inherit self;
-            k8sManifestsPath = ./k8s;
-          };
-        };
-
-        # Legacy alias (points to minikube for backwards compatibility)
-        microvm = nixpkgs.lib.nixosSystem {
-          system = "x86_64-linux";
-          modules = [
-            microvm.nixosModules.microvm
-            (import ./nix/microvm { variant = "minikube"; })
-          ];
-          specialArgs = {
-            inherit self;
-            k8sManifestsPath = ./k8s;
-          };
-        };
-      };
-
-      # NixOS modules for testing framework
-      nixosModules = {
-        microvm-docker = import ./nix/microvm { variant = "docker"; };
-        microvm-k3s = import ./nix/microvm { variant = "k3s"; };
-        microvm-minikube = import ./nix/microvm { variant = "minikube"; };
-      };
+      nixosModules = nixpkgs.lib.genAttrs microvmNames
+        (name: import ./nix/microvm { variant = nixpkgs.lib.removePrefix "microvm-" name; });
     };
 }
