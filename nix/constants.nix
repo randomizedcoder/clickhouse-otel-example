@@ -8,10 +8,10 @@ rec {
   # ============================================
   serviceNames = {
     clickhouse = "clickhouse";
-    mongodb = "mongodb";
     fluentbit = "fluentbit";
     loggen = "loggen";
-    hyperdx = "hyperdx";
+    clickstack = "clickstack";
+    otelCollector = "otel-collector";
     redpanda = "redpanda";
     redpandaConsole = "redpanda-console";
     gdp = "gdp";
@@ -22,10 +22,10 @@ rec {
   # ============================================
   containerNames = {
     clickhouse = "otel-clickhouse";
-    mongodb = "otel-mongodb";
     fluentbit = "otel-fluentbit";
     loggen = "otel-loggen";
-    hyperdx = "otel-hyperdx";
+    clickstack = "otel-clickstack";
+    otelCollector = "otel-collector";
     redpanda = "otel-redpanda";
     redpandaConsole = "otel-redpanda-console";
     gdp = "otel-gdp";
@@ -39,10 +39,14 @@ rec {
     redpanda = "docker.redpanda.com/redpandadata/redpanda:v24.3.8";
     # Console: React+Go web UI
     redpandaConsole = "docker.redpanda.com/redpandadata/console:v2.8.4";
-    # ClickHouse 25.6: Compatible with HyperDX (26.x has EXPLAIN ESTIMATE syntax issues)
-    clickhouse = "clickhouse/clickhouse-server:25.6";
-    # HyperDX: Try older 2.x version to avoid EXPLAIN ESTIMATE issues
-    hyperdx = "hyperdx/hyperdx:2.6.0";
+    # ClickHouse: Using official image for stability
+    clickhouse = "clickhouse/clickhouse-server:latest";
+    # ClickStack: Official ClickHouse observability stack (HyperDX + OTel collector)
+    # Replaces separate hyperdx container - bundles UI + ingestion
+    # https://clickhouse.com/docs/use-cases/observability/clickstack
+    clickstack = "clickhouse/clickstack-all-in-one:latest";
+    # OTel Collector: Standalone collector for OTLP ingestion
+    otelCollector = "otel/opentelemetry-collector-contrib:0.96.0";
   };
 
   # ============================================
@@ -68,7 +72,6 @@ rec {
   databases = {
     otelLogs = "default";
     gdp = "gdp";
-    hyperdx = "hyperdx";
   };
 
   # ============================================

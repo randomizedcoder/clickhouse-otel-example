@@ -99,7 +99,7 @@ let
     end
   '';
 
-  # FluentBit config for docker-compose (uses docker service names)
+  # FluentBit config for docker-compose (reads Docker log files directly)
   fluentbitConf = writeText "fluent-bit.conf" ''
     [SERVICE]
         Flush         1
@@ -109,12 +109,20 @@ let
         HTTP_Listen   0.0.0.0
         HTTP_Port     ${toString ports.services.fluentbitMetrics}
 
+    # Read Docker container log files directly
+    # Docker writes JSON logs to /home/das/docker/containers/<id>/<id>-json.log
     [INPUT]
-        Name          forward
-        Listen        0.0.0.0
-        Port          24224
+        Name          tail
+        Tag           docker.loggen
+        Path          /home/das/docker/containers/*/*-json.log
+        Parser        docker
+        Refresh_Interval 1
+        Rotate_Wait   30
+        Mem_Buf_Limit 5MB
+        Skip_Long_Lines On
+        DB            /fluent-bit/tail.db
 
-    # Parse the nested JSON from Docker's fluentd driver
+    # Parse the nested JSON from Docker's log wrapper
     # The log field contains JSON like: {"level":"info","ts":...,"random_number":42,...}
     [FILTER]
         Name          parser
@@ -149,11 +157,114 @@ let
 
   # FluentBit parsers config
   fluentbitParsers = writeText "parsers.conf" ''
+    # Docker JSON log format parser
+    [PARSER]
+        Name        docker
+        Format      json
+        Time_Key    time
+        Time_Format %Y-%m-%dT%H:%M:%S.%L
+        Time_Keep   On
+
+    # Nested JSON log content parser
     [PARSER]
         Name        json
         Format      json
         Time_Key    ts
         Time_Format %s.%L
+  '';
+
+  # OTel Collector config for ClickHouse export
+  # Supports both OTLP (Method 2) and Filelog (Method 3) receivers
+  otelCollectorConfig = writeText "otel-collector-config.yaml" ''
+    receivers:
+      # Method 2: OTLP Direct - receives logs from OTel SDK
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+      # Method 3: Filelog - reads container log files directly
+      # Docker stores logs at /home/das/docker/containers/<id>/<id>-json.log
+      filelog:
+        include:
+          - /home/das/docker/containers/*/*-json.log
+        start_at: end
+        include_file_path: true
+        operators:
+          # Parse Docker's JSON log wrapper: {"log": "...", "stream": "stdout", "time": "..."}
+          - type: json_parser
+            id: docker_parser
+          # Only process stdout (skip stderr)
+          - type: filter
+            id: filter_stderr
+            expr: 'attributes.stream != "stdout"'
+          # Move the log field to body for further processing
+          - type: move
+            from: attributes.log
+            to: body
+          # Parse our JSON log content from body
+          - type: json_parser
+            id: log_parser
+            parse_from: body
+            parse_to: attributes
+          # Only process Method 3 logs (contains "filelog receiver" in msg)
+          - type: filter
+            id: filter_method3
+            expr: 'attributes.msg == nil or not (attributes.msg contains "filelog receiver")'
+          # Set body to the msg field for display
+          - type: move
+            id: set_body
+            from: attributes.msg
+            to: body
+
+    processors:
+      batch:
+        timeout: 1s
+        send_batch_size: 1024
+
+      # Transform processor to fix timestamps and set severity
+      transform/filelog:
+        log_statements:
+          - context: log
+            statements:
+              # Fix timestamp: use observed_time if time is not set
+              - set(time_unix_nano, observed_time_unix_nano) where time_unix_nano == 0
+              # Set severity from level attribute
+              - set(severity_text, "INFO") where attributes["level"] == "info"
+              - set(severity_number, 9) where attributes["level"] == "info"
+              - set(severity_text, "DEBUG") where attributes["level"] == "debug"
+              - set(severity_number, 5) where attributes["level"] == "debug"
+              - set(severity_text, "WARN") where attributes["level"] == "warn"
+              - set(severity_number, 13) where attributes["level"] == "warn"
+              - set(severity_text, "ERROR") where attributes["level"] == "error"
+              - set(severity_number, 17) where attributes["level"] == "error"
+
+    exporters:
+      clickhouse:
+        endpoint: tcp://${constants.serviceNames.clickhouse}:${toString ports.services.clickhouseNative}
+        database: ${constants.databases.otelLogs}
+        logs_table_name: otel_logs
+        timeout: 5s
+        retry_on_failure:
+          enabled: true
+          initial_interval: 5s
+          max_interval: 30s
+          max_elapsed_time: 300s
+
+    service:
+      pipelines:
+        # Method 2: OTLP Direct pipeline
+        logs/otlp:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [clickhouse]
+        # Method 3: Filelog pipeline
+        logs/filelog:
+          receivers: [filelog]
+          processors: [transform/filelog, batch]
+          exporters: [clickhouse]
   '';
 
   # Generate docker-compose.yaml
@@ -274,6 +385,8 @@ let
           - clickhouse-data:/var/lib/clickhouse
           - ${gdp.kafkaConfig}/kafka.xml:/etc/clickhouse-server/config.d/kafka.xml:ro
           - ${clickhouseUsersConfig}:/etc/clickhouse-server/users.d/default-allow-all.xml:ro
+          # GDP protobuf schemas for Kafka engine
+          - ${gdp.formatSchemas}:/var/lib/clickhouse/format_schemas:ro
         environment:
           - CLICKHOUSE_DB=${constants.databases.otelLogs}
         healthcheck:
@@ -313,32 +426,38 @@ let
       #   networks:
       #     - ${constants.network.name}
 
-      ${constants.serviceNames.mongodb}:
-        image: mongo:7
-        container_name: ${constants.containerNames.mongodb}
-        ports:
-          - "${toString ports.compose.mongodb}:${toString ports.services.mongodb}"
-        volumes:
-          - mongodb-data:/data/db
-          - ${mongodbInit}:/docker-entrypoint-initdb.d/init-hyperdx.js:ro
-        healthcheck:
-          test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-          interval: 5s
-          timeout: 5s
-          retries: 10
-        networks:
-          - ${constants.network.name}
-
       ${constants.serviceNames.fluentbit}:
         image: fluent/fluent-bit:latest
         container_name: ${constants.containerNames.fluentbit}
         ports:
           - "${toString ports.services.fluentbitMetrics}:${toString ports.services.fluentbitMetrics}"
-          - "24224:24224"
         volumes:
           - ${fluentbitConf}:/fluent-bit/etc/fluent-bit.conf:ro
           - ${fluentbitParsers}:/fluent-bit/etc/parsers.conf:ro
           - ${luaTransform}:/fluent-bit/etc/transform.lua:ro
+          # Mount Docker container logs for tail input
+          - /home/das/docker/containers:/home/das/docker/containers:ro
+        depends_on:
+          ${constants.serviceNames.clickhouse}:
+            condition: service_healthy
+        networks:
+          - ${constants.network.name}
+
+      # ============================================
+      # OTel Collector - Method 2 (OTLP Direct) + Method 3 (Filelog)
+      # ============================================
+      ${constants.serviceNames.otelCollector}:
+        image: ${constants.externalImages.otelCollector}
+        container_name: ${constants.containerNames.otelCollector}
+        # Run as root (UID 0) to read Docker container logs
+        user: "0"
+        volumes:
+          - ${otelCollectorConfig}:/etc/otelcol-contrib/config.yaml:ro
+          # Mount Docker container logs for filelog receiver (Method 3)
+          - /home/das/docker/containers:/home/das/docker/containers:ro
+        ports:
+          - "${toString ports.compose.clickstackOtlpGrpc}:4317"
+          - "${toString ports.compose.clickstackOtlpHttp}:4318"
         depends_on:
           ${constants.serviceNames.clickhouse}:
             condition: service_healthy
@@ -355,47 +474,38 @@ let
           - LOGGEN_HEALTH_PORT=${toString ports.services.loggenHealth}
         ports:
           - "${toString ports.services.loggenHealth}:${toString ports.services.loggenHealth}"
+        # Use json-file logging driver so both FluentBit and OTel Collector
+        # filelog receiver can read the container logs
         logging:
-          driver: fluentd
+          driver: json-file
           options:
-            fluentd-address: localhost:24224
-            fluentd-async: "true"
-            fluentd-retry-wait: 1s
-            fluentd-max-retries: 30
-            tag: loggen
+            max-size: "10m"
+            max-file: "3"
         depends_on:
           - ${constants.serviceNames.fluentbit}
         networks:
           - ${constants.network.name}
 
-      ${constants.serviceNames.hyperdx}:
-        # Using Docker Hub HyperDX
-        image: hyperdx/hyperdx:latest
-        container_name: ${constants.containerNames.hyperdx}
-        # Override entrypoint for IS_LOCAL_APP_MODE
-        entrypoint: ["/bin/sh", "-c", "cp /etc/local/entry.sh /tmp/entry.sh && sed 's/REQUIRED_AUTH/DANGEROUSLY_is_local_app_mode💀/g' /etc/local/entry.sh > /tmp/entry.sh && chmod +x /tmp/entry.sh && exec /bin/sh /tmp/entry.sh"]
+      # ============================================
+      # ClickStack (HyperDX UI only)
+      # Official ClickHouse observability UI - we use standalone OTel Collector
+      # https://clickhouse.com/docs/use-cases/observability/clickstack
+      # ============================================
+      ${constants.serviceNames.clickstack}:
+        image: ${constants.externalImages.clickstack}
+        container_name: ${constants.containerNames.clickstack}
+        # Override entrypoint to patch entry.sh and enable local app mode
+        entrypoint: ["/bin/sh", "-c", "sed -i 's/REQUIRED_AUTH/DANGEROUSLY_is_local_app_mode💀/g' /etc/local/entry.sh && exec /bin/sh /etc/local/entry.sh"]
         environment:
-          - MONGO_URI=mongodb://${constants.serviceNames.mongodb}:${toString ports.services.mongodb}/${constants.databases.hyperdx}
-          - CLICKHOUSE_HOST=${constants.serviceNames.clickhouse}
-          - CLICKHOUSE_PORT=${toString ports.services.clickhouseHttp}
+          # Connect to external ClickHouse (not the bundled one)
+          - CLICKHOUSE_ENDPOINT=http://${constants.serviceNames.clickhouse}:${toString ports.services.clickhouseHttp}
           - CLICKHOUSE_USER=default
           - CLICKHOUSE_PASSWORD=
-          - IS_LOCAL_APP_MODE=DANGEROUSLY_is_local_app_mode💀
-          - FRONTEND_URL=http://${ports.externalHost}:${toString ports.compose.hyperdxApp}
-          - NEXT_PUBLIC_API_URL=http://${ports.externalHost}:${toString ports.compose.hyperdxApi}
-          - DEFAULT_CONNECTIONS=[{"name":"Default","host":"http://${constants.serviceNames.clickhouse}:${toString ports.services.clickhouseHttp}","username":"default","password":""}]
-          # TODO: Auto-config sources causes EXPLAIN ESTIMATE syntax errors in ClickHouse 26.x
-          # Configure source manually via UI: Settings > Sources > Add source for default.otel_logs
-          # - 'DEFAULT_SOURCES=[{"name":"OTel Logs","kind":"log","connection":"Default","from":{"databaseName":"default","tableName":"otel_logs"},"timestampValueExpression":"TimestampTime","displayedTimestampValueExpression":"Timestamp","bodyExpression":"Body","severityTextExpression":"SeverityText","serviceNameExpression":"ServiceName","traceIdExpression":"TraceId","spanIdExpression":"SpanId"}]'
-          - HYPERDX_API_PORT=${toString ports.services.hyperdxApi}
-          - HYPERDX_APP_PORT=${toString ports.services.hyperdxApp}
         ports:
-          - "${toString ports.compose.hyperdxApi}:${toString ports.services.hyperdxApi}"
-          - "${toString ports.compose.hyperdxApp}:${toString ports.services.hyperdxApp}"
+          # Only expose the UI port - OTel Collector handles OTLP ingestion separately
+          - "${toString ports.compose.clickstackUi}:${toString ports.services.clickstackUi}"
         depends_on:
           ${constants.serviceNames.clickhouse}:
-            condition: service_healthy
-          ${constants.serviceNames.mongodb}:
             condition: service_healthy
         networks:
           - ${constants.network.name}
@@ -406,24 +516,7 @@ let
 
     volumes:
       clickhouse-data:
-      mongodb-data:
       redpanda-data:
-  '';
-
-  # MongoDB init script - minimal init, let HyperDX handle user/team creation
-  # NOTE: Previous seed with string IDs caused type mismatch with HyperDX's ObjectId refs
-  mongodbInit = writeText "init-hyperdx.js" ''
-    // Initialize hyperdx database
-    // HyperDX's IS_LOCAL_APP_MODE creates team/user with proper ObjectIds
-    db = db.getSiblingDB('hyperdx');
-    print('HyperDX database initialized');
-
-    // COMMENTED OUT: Previous seed caused team ObjectId mismatch
-    // Our string _id: '_local_team_' didn't match HyperDX's ObjectId references
-    // const teamId = '_local_team_';
-    // const userId = '_local_user_';
-    // db.teams.insertOne({ _id: teamId, name: 'Local Team', ... });
-    // db.users.insertOne({ _id: userId, name: 'Local User', team: teamId, ... });
   '';
 
   # ClickHouse init SQL
@@ -488,15 +581,16 @@ let
       echo "=============================================="
       echo ""
       echo "ACCESS POINTS:"
-      echo "  HyperDX UI:         http://localhost:${toString ports.compose.hyperdxApp}"
-      echo "  HyperDX API:        http://localhost:${toString ports.compose.hyperdxApi}"
+      echo "  ClickStack UI:      http://localhost:${toString ports.compose.clickstackUi}"
+      echo "  OTLP gRPC:          localhost:${toString ports.compose.clickstackOtlpGrpc}"
+      echo "  OTLP HTTP:          http://localhost:${toString ports.compose.clickstackOtlpHttp}"
       echo "  ClickHouse HTTP:    http://localhost:${toString ports.compose.clickhouseHttp}"
       echo "  Redpanda Console:   http://localhost:${toString ports.compose.redpandaConsole}"
       echo "  Redpanda Kafka:     localhost:${toString ports.compose.redpandaKafka}"
       echo "  GDP Prometheus:     http://localhost:${toString ports.compose.gdpPrometheus}/metrics"
       echo ""
       echo "FIRST-TIME SETUP:"
-      echo "  nix run .#compose-setup    # Create connection, source, and dashboard"
+      echo "  nix run .#compose-setup    # Create ClickHouse tables"
       echo ""
       echo "VIEW LOGS:"
       echo "  docker logs -f ${constants.containerNames.loggen}"
@@ -638,185 +732,20 @@ let
     tags = [ "loggen" "demo" ];
   });
 
-  # JavaScript for MongoDB setup - using double quotes to avoid Nix escaping issues
-  setupJs = writeText "setup-hyperdx.js" ''
-    // Setup script for HyperDX - creates connection, source, and dashboard
-    // Run with: mongosh mongodb://localhost:37017/hyperdx setup-hyperdx.js
-
-    // IS_LOCAL_APP_MODE uses this ObjectId (hex encoding of "_local_team_")
-    const LOCAL_TEAM_ID = ObjectId("5f6c6f63616c5f7465616d5f");
-
-    // Create team if not exists (IS_LOCAL_APP_MODE expects this ID)
-    if (db.teams.countDocuments({_id: LOCAL_TEAM_ID}) === 0) {
-      print("Creating local team...");
-      db.teams.insertOne({
-        _id: LOCAL_TEAM_ID,
-        name: "Local Team",
-        allowedAuthMethods: ["local"],
-        hookId: "local-hook-id",
-        apiKey: "local-api-key",
-        collectorAuthenticationEnforced: false,
-        createdAt: new Date(),
-        updatedAt: new Date()
-      });
-    }
-
-    const TEAM_ID = LOCAL_TEAM_ID;
-    print("Team ID: " + TEAM_ID);
-
-    // Create connection if not exists
-    if (db.connections.countDocuments({name: "Default"}) === 0) {
-      print("Creating ClickHouse connection...");
-      db.connections.insertOne({
-        team: TEAM_ID,
-        name: "Default",
-        host: "http://clickhouse:8123",
-        username: "default",
-        password: "",
-        createdAt: new Date(),
-        updatedAt: new Date()
-      });
-    } else {
-      print("Connection already exists");
-    }
-
-    const CONN_ID = db.connections.findOne({name: "Default"})._id;
-    print("Connection ID: " + CONN_ID);
-
-    // Create source if not exists
-    if (db.sources.countDocuments({name: "OTel Logs"}) === 0) {
-      print("Creating OTel Logs source...");
-      db.sources.insertOne({
-        team: TEAM_ID,
-        connection: CONN_ID,
-        name: "OTel Logs",
-        kind: "log",
-        from: { databaseName: "default", tableName: "otel_logs" },
-        timestampValueExpression: "TimestampTime",
-        displayedTimestampValueExpression: "Timestamp",
-        bodyExpression: "Body",
-        severityTextExpression: "SeverityText",
-        serviceNameExpression: "ServiceName",
-        traceIdExpression: "TraceId",
-        spanIdExpression: "SpanId",
-        highlightedTraceAttributeExpressions: [],
-        highlightedRowAttributeExpressions: [],
-        materializedViews: [],
-        querySettings: [],
-        createdAt: new Date(),
-        updatedAt: new Date()
-      });
-    } else {
-      print("Source already exists");
-    }
-
-    const SOURCE_ID = db.sources.findOne({name: "OTel Logs"})._id;
-    print("Source ID: " + SOURCE_ID);
-
-    // Create dashboard if not exists
-    if (db.dashboards.countDocuments({name: "Loggen Metrics"}) === 0) {
-      print("Creating Loggen Metrics dashboard...");
-      db.dashboards.insertOne({
-        team: TEAM_ID,
-        name: "Loggen Metrics",
-        tiles: [
-          {
-            id: new ObjectId().toString(),
-            name: "RandomString Distribution",
-            x: 0, y: 0, w: 12, h: 4,
-            config: {
-              source: SOURCE_ID.toString(),
-              displayType: "table",
-              select: [
-                { aggFn: "count", alias: "Count" }
-              ],
-              from: { databaseName: "default", tableName: "otel_logs" },
-              where: "",
-              whereLanguage: "lucene",
-              groupBy: [{ valueExpression: "RandomString" }],
-              orderBy: [{ valueExpression: "Count", ordering: "DESC" }]
-            }
-          },
-          {
-            id: new ObjectId().toString(),
-            name: "RandomNumber Over Time",
-            x: 12, y: 0, w: 12, h: 4,
-            config: {
-              source: SOURCE_ID.toString(),
-              displayType: "line",
-              select: [
-                { aggFn: "avg", valueExpression: "RandomNumber", alias: "Avg RandomNumber" }
-              ],
-              from: { databaseName: "default", tableName: "otel_logs" },
-              where: "RandomNumber:>0",
-              whereLanguage: "lucene",
-              groupBy: [],
-              granularity: "auto"
-            }
-          },
-          {
-            id: new ObjectId().toString(),
-            name: "Avg RandomNumber by String",
-            x: 0, y: 4, w: 12, h: 4,
-            config: {
-              source: SOURCE_ID.toString(),
-              displayType: "table",
-              select: [
-                { aggFn: "avg", valueExpression: "RandomNumber", alias: "Avg" }
-              ],
-              from: { databaseName: "default", tableName: "otel_logs" },
-              where: "",
-              whereLanguage: "lucene",
-              groupBy: [{ valueExpression: "RandomString" }],
-              orderBy: [{ valueExpression: "Avg", ordering: "DESC" }]
-            }
-          },
-          {
-            id: new ObjectId().toString(),
-            name: "Log Count Over Time",
-            x: 12, y: 4, w: 12, h: 4,
-            config: {
-              source: SOURCE_ID.toString(),
-              displayType: "line",
-              select: [
-                { aggFn: "count", alias: "Count" }
-              ],
-              from: { databaseName: "default", tableName: "otel_logs" },
-              where: "",
-              whereLanguage: "lucene",
-              groupBy: [],
-              granularity: "auto"
-            }
-          }
-        ],
-        tags: ["loggen", "demo"],
-        filters: [],
-        createdAt: new Date(),
-        updatedAt: new Date()
-      });
-    } else {
-      print("Dashboard already exists");
-    }
-
-    print("");
-    print("Setup complete!");
-  '';
-
-  # Script to setup GDP tables and HyperDX with connection, source, and dashboard
+  # Script to setup ClickHouse tables (ClickStack handles UI config automatically)
   composeSetup = pkgs.writeShellApplication {
     name = "compose-setup";
-    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.mongosh pkgs.docker ];
+    runtimeInputs = [ pkgs.curl pkgs.docker ];
     text = ''
       set -euo pipefail
 
-      API_URL="http://localhost:${toString ports.compose.hyperdxApi}"
-      MONGO_URI="mongodb://localhost:${toString ports.compose.mongodb}/hyperdx"
       CLICKHOUSE_URL="http://localhost:${toString ports.compose.clickhouseHttp}"
+      CLICKSTACK_URL="http://localhost:${toString ports.compose.clickstackUi}"
 
       # ============================================
-      # 1. Setup GDP Tables in ClickHouse
+      # 1. Setup ClickHouse Tables
       # ============================================
-      echo "Setting up GDP tables..."
+      echo "Setting up ClickHouse tables..."
 
       # Wait for ClickHouse to be ready
       echo "Waiting for ClickHouse..."
@@ -836,35 +765,26 @@ let
       echo "ClickHouse tables created successfully"
 
       # ============================================
-      # 2. Setup HyperDX
+      # 2. Wait for ClickStack
       # ============================================
       echo ""
-      echo "Setting up HyperDX..."
-
-      # Wait for HyperDX API to be ready
-      echo "Waiting for HyperDX API..."
+      echo "Waiting for ClickStack UI..."
       for i in {1..30}; do
-        if curl -s "$API_URL/health" | jq -e '.data == "OK"' > /dev/null 2>&1; then
-          echo "HyperDX API is ready"
+        if curl -s "$CLICKSTACK_URL" >/dev/null 2>&1; then
+          echo "ClickStack UI is ready"
           break
         fi
         echo "  Waiting... ($i/30)"
         sleep 2
       done
 
-      # Run MongoDB setup script (creates team, connection, source, dashboard)
-      echo ""
-      mongosh "$MONGO_URI" --quiet ${setupJs}
-
       echo ""
       echo "Setup complete!"
       echo "  - OTel Logs: default.otel_logs (MergeTree)"
       echo "  - GDP Tables: ${constants.databases.gdp}.ProtobufSingle (MergeTree + Kafka + MV)"
-      echo "  - Connection: Default (http://clickhouse:8123)"
-      echo "  - Source: OTel Logs (default.otel_logs)"
-      echo "  - Dashboard: Loggen Metrics"
       echo ""
-      echo "Open HyperDX: http://localhost:${toString ports.compose.hyperdxApp}"
+      echo "Open ClickStack UI: $CLICKSTACK_URL"
+      echo "Configure data source via Team Settings in the UI"
     '';
   };
 

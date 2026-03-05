@@ -68,11 +68,11 @@ let
   };
 
   # Extract ClickHouse format schemas from GDP repo
-  # Only copy prometheus_protolist.proto (not prometheus.proto) to avoid duplicate
-  # PromRecordCounter message definition conflicts
+  # Include prometheus.proto for ProtobufSingle format
   formatSchemas = runCommand "gdp-format-schemas" { } ''
     mkdir -p $out
     if [ -d "${gdpSrc}/build/containers/clickhouse/format_schemas" ]; then
+      cp ${gdpSrc}/build/containers/clickhouse/format_schemas/prometheus.proto $out/
       cp ${gdpSrc}/build/containers/clickhouse/format_schemas/prometheus_protolist.proto $out/
       cp -r ${gdpSrc}/build/containers/clickhouse/format_schemas/google $out/
     fi
@@ -110,7 +110,7 @@ let
     CREATE DATABASE IF NOT EXISTS ${constants.databases.gdp};
 
     -- ProtobufSingle table for storing Prometheus metrics
-    -- Schema matches prometheus_protolist.proto PromRecordCounter message
+    -- Schema matches prometheus.proto PromRecordCounter message
     CREATE TABLE IF NOT EXISTS ${constants.databases.gdp}.ProtobufSingle (
         Timestamp_Ns DateTime64(9,'UTC') CODEC(DoubleDelta, LZ4),
         Hostname LowCardinality(String) CODEC(LZ4),
@@ -130,7 +130,7 @@ let
     TTL toDateTime(Timestamp_Ns) + INTERVAL ${toString constants.retention.gdpMetrics} DAY;
 
     -- Kafka engine table using ProtobufSingle format
-    -- Reads from Redpanda using prometheus_protolist.proto schema
+    -- Reads from Redpanda using prometheus.proto schema
     CREATE TABLE IF NOT EXISTS ${constants.databases.gdp}.ProtobufSingle_kafka (
         Timestamp_Ns DateTime64(9,'UTC') CODEC(DoubleDelta, LZ4),
         Hostname LowCardinality(String) CODEC(LZ4),
@@ -149,7 +149,7 @@ let
         kafka_broker_list = '${constants.serviceNames.redpanda}:${toString ports.services.redpandaKafkaInternal}',
         kafka_topic_list = '${constants.kafkaTopics.protobufSingle}',
         kafka_group_name = 'clickhouse_gdp_consumer',
-        kafka_schema = 'prometheus_protolist.proto:PromRecordCounter',
+        kafka_schema = 'prometheus.proto:PromRecordCounter',
         kafka_handle_error_mode = 'stream',
         kafka_poll_max_batch_size = 1024,
         kafka_format = 'ProtobufSingle';

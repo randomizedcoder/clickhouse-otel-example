@@ -20,12 +20,17 @@
     clickhouseNative = 9000;
     clickhouseInterserver = 9009;
 
-    # MongoDB (HyperDX session storage)
+    # MongoDB (for standalone image builds, not used by ClickStack)
     mongodb = 27017;
 
-    # HyperDX
+    # HyperDX (for standalone image builds, not used by ClickStack)
     hyperdxApi = 8000;
     hyperdxApp = 8080;
+
+    # ClickStack (HyperDX + OTel collector)
+    clickstackUi = 8080;
+    clickstackOtlpGrpc = 4317;
+    clickstackOtlpHttp = 4318;
 
     # SSH (inside VM)
     ssh = 22;
@@ -50,22 +55,20 @@
   hostForwards = {
     ssh = 22022;
     fluentbitMetrics = 22020;
-    hyperdxApi = 28000;
-    hyperdxApp = 28080;
+    clickstackUi = 28080;
+    clickstackOtlpGrpc = 24317;
+    clickstackOtlpHttp = 24318;
     clickhouseHttp = 28123;
     clickhouseNative = 29000;
-    mongodb = 27017; # Standard port, unlikely to conflict
-    # NodePort forwards (via minikube tunnel on VM localhost)
-    hyperdxApiNodePort = 30800;
-    hyperdxAppNodePort = 30808;
   };
 
   # ============================================
   # Kubernetes NodePorts
   # ============================================
   nodePorts = {
-    hyperdxApi = 30800;
-    hyperdxApp = 30808;
+    clickstackUi = 30808;
+    clickstackOtlpGrpc = 30317;
+    clickstackOtlpHttp = 30318;
   };
 
   # ============================================
@@ -73,9 +76,9 @@
   # Using 3XXXX prefix to avoid conflicts with local services
   # ============================================
   compose = {
-    hyperdxApi = 38000;
-    hyperdxApp = 38080;
-    mongodb = 37017;
+    clickstackUi = 38090;
+    clickstackOtlpGrpc = 34317;
+    clickstackOtlpHttp = 34318;
     clickhouseHttp = 38123;
     clickhouseNative = 39000;
 
