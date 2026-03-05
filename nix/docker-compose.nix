@@ -383,12 +383,15 @@ let
           - "${toString ports.compose.clickhouseNative}:${toString ports.services.clickhouseNative}"
         volumes:
           - clickhouse-data:/var/lib/clickhouse
+          - clickhouse-schemas:/var/lib/clickhouse/format_schemas
           - ${gdp.kafkaConfig}/kafka.xml:/etc/clickhouse-server/config.d/kafka.xml:ro
           - ${clickhouseUsersConfig}:/etc/clickhouse-server/users.d/default-allow-all.xml:ro
-          # GDP protobuf schemas for Kafka engine
-          - ${gdp.formatSchemas}:/var/lib/clickhouse/format_schemas:ro
+          # GDP protobuf schemas (read-only source, copied at startup)
+          - ${gdp.formatSchemas}:/tmp/proto_src:ro
         environment:
           - CLICKHOUSE_DB=${constants.databases.otelLogs}
+        entrypoint: ["/bin/sh", "-c"]
+        command: ["cp -r /tmp/proto_src/* /var/lib/clickhouse/format_schemas/ 2>/dev/null || true; exec /entrypoint.sh"]
         healthcheck:
           test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
           interval: 5s
@@ -516,6 +519,7 @@ let
 
     volumes:
       clickhouse-data:
+      clickhouse-schemas:
       redpanda-data:
   '';
 
