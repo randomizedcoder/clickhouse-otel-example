@@ -383,12 +383,15 @@ let
           - "${toString ports.compose.clickhouseNative}:${toString ports.services.clickhouseNative}"
         volumes:
           - clickhouse-data:/var/lib/clickhouse
+          - clickhouse-schemas:/var/lib/clickhouse/format_schemas
           - ${gdp.kafkaConfig}/kafka.xml:/etc/clickhouse-server/config.d/kafka.xml:ro
           - ${clickhouseUsersConfig}:/etc/clickhouse-server/users.d/default-allow-all.xml:ro
-          # GDP protobuf schemas for Kafka engine
-          - ${gdp.formatSchemas}:/var/lib/clickhouse/format_schemas:ro
+          # GDP protobuf schemas (read-only source, copied at startup)
+          - ${gdp.formatSchemas}:/tmp/proto_src:ro
         environment:
           - CLICKHOUSE_DB=${constants.databases.otelLogs}
+        entrypoint: ["/bin/sh", "-c"]
+        command: ["cp -r /tmp/proto_src/* /var/lib/clickhouse/format_schemas/ 2>/dev/null || true; exec /entrypoint.sh"]
         healthcheck:
           test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
           interval: 5s
@@ -516,10 +519,13 @@ let
 
     volumes:
       clickhouse-data:
+      clickhouse-schemas:
       redpanda-data:
   '';
 
   # ClickHouse init SQL
+  # Note: OTel Collector may auto-create otel_logs before this runs,
+  # so we add ALTER TABLE statements to ensure required columns exist
   clickhouseInit = writeText "init.sql" ''
     -- HyperDX compatible OTel logs schema with custom loggen fields
     CREATE TABLE IF NOT EXISTS default.otel_logs (
@@ -559,6 +565,15 @@ let
     ORDER BY (ServiceName, TimestampTime, Timestamp)
     TTL TimestampTime + INTERVAL 7 DAY
     SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+    -- Add columns if OTel Collector auto-created the table first
+    -- These are required for HyperDX compatibility
+    ALTER TABLE default.otel_logs ADD COLUMN IF NOT EXISTS TimestampTime DateTime DEFAULT toDateTime(Timestamp);
+    ALTER TABLE default.otel_logs ADD COLUMN IF NOT EXISTS RandomNumber UInt32 DEFAULT 0;
+    ALTER TABLE default.otel_logs ADD COLUMN IF NOT EXISTS RandomString LowCardinality(String);
+    ALTER TABLE default.otel_logs ADD COLUMN IF NOT EXISTS Count UInt64 DEFAULT 0;
+    ALTER TABLE default.otel_logs ADD COLUMN IF NOT EXISTS Method LowCardinality(String) DEFAULT 'unknown';
+    ALTER TABLE default.otel_logs ADD COLUMN IF NOT EXISTS IngestionTimestamp DateTime64(9) DEFAULT now64(9);
   '';
 
   # Script to run docker-compose up
@@ -735,22 +750,19 @@ let
   # Script to setup ClickHouse tables (ClickStack handles UI config automatically)
   composeSetup = pkgs.writeShellApplication {
     name = "compose-setup";
-    runtimeInputs = [ pkgs.curl pkgs.docker ];
+    runtimeInputs = [ pkgs.docker ];
     text = ''
       set -euo pipefail
-
-      CLICKHOUSE_URL="http://localhost:${toString ports.compose.clickhouseHttp}"
-      CLICKSTACK_URL="http://localhost:${toString ports.compose.clickstackUi}"
 
       # ============================================
       # 1. Setup ClickHouse Tables
       # ============================================
       echo "Setting up ClickHouse tables..."
 
-      # Wait for ClickHouse to be ready
+      # Wait for ClickHouse to be ready (use docker exec to avoid network issues)
       echo "Waiting for ClickHouse..."
       for i in {1..30}; do
-        if curl -s "$CLICKHOUSE_URL/?query=SELECT+1" 2>/dev/null | grep -q "1"; then
+        if docker exec ${constants.containerNames.clickhouse} clickhouse-client --query "SELECT 1" 2>/dev/null | grep -q "1"; then
           echo "ClickHouse is ready"
           break
         fi
@@ -765,12 +777,12 @@ let
       echo "ClickHouse tables created successfully"
 
       # ============================================
-      # 2. Wait for ClickStack
+      # 2. Wait for ClickStack (use docker healthcheck)
       # ============================================
       echo ""
       echo "Waiting for ClickStack UI..."
       for i in {1..30}; do
-        if curl -s "$CLICKSTACK_URL" >/dev/null 2>&1; then
+        if docker inspect ${constants.containerNames.clickstack} --format '{{.State.Health.Status}}' 2>/dev/null | grep -q "healthy"; then
           echo "ClickStack UI is ready"
           break
         fi
@@ -783,7 +795,7 @@ let
       echo "  - OTel Logs: default.otel_logs (MergeTree)"
       echo "  - GDP Tables: ${constants.databases.gdp}.ProtobufSingle (MergeTree + Kafka + MV)"
       echo ""
-      echo "Open ClickStack UI: $CLICKSTACK_URL"
+      echo "Open ClickStack UI: http://localhost:${toString ports.compose.clickstackUi}"
       echo "Configure data source via Team Settings in the UI"
     '';
   };
