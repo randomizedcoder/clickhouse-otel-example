@@ -116,6 +116,42 @@ let
 
       echo ""
     }
+
+    # GDP Pipeline verification functions
+    check_gdp_table_exists() {
+      local endpoint="$1"
+      local result
+      result=$(curl -s "$endpoint/?query=SELECT+count()+FROM+system.tables+WHERE+database='gdp'+AND+name='ProtobufSingle'" 2>/dev/null || echo 0)
+      [ "$result" = "1" ]
+    }
+
+    check_gdp_pipeline() {
+      local endpoint="$1"
+      local count
+      count=$(curl -s "$endpoint/?query=SELECT+count()+FROM+gdp.ProtobufSingle" 2>/dev/null || echo 0)
+      count=''${count:-0}
+      [ "$count" -gt 0 ]
+    }
+
+    wait_for_gdp_metrics() {
+      local endpoint="$1"
+      local start_count end_count
+      start_count=$(curl -s "$endpoint/?query=SELECT+count()+FROM+gdp.ProtobufSingle" 2>/dev/null || echo 0)
+      start_count=''${start_count:-0}
+      sleep 15
+      end_count=$(curl -s "$endpoint/?query=SELECT+count()+FROM+gdp.ProtobufSingle" 2>/dev/null || echo 0)
+      end_count=''${end_count:-0}
+      [ "$end_count" -gt "$start_count" ]
+    }
+
+    check_kafka_consumer() {
+      local endpoint="$1"
+      local exceptions
+      # Check for any exceptions in the exceptions.text array
+      exceptions=$(curl -s "$endpoint/?query=SELECT+countIf(length(exceptions.text)>0)+FROM+system.kafka_consumers" 2>/dev/null || echo 0)
+      exceptions=''${exceptions:-0}
+      [ "$exceptions" = "0" ]
+    }
   '';
 
 in
@@ -137,6 +173,20 @@ in
       print_info "Starting Docker Compose stack..."
       nix run .#compose-up
 
+      # Step 1.5: Wait for ClickHouse to be ready then run setup
+      print_info "Waiting for ClickHouse to be ready for setup..."
+      for i in {1..24}; do
+        if check_clickhouse_ready "$CLICKHOUSE_URL"; then
+          break
+        fi
+        sleep 5
+      done
+
+      # Initialize ClickHouse tables (OTel logs + GDP)
+      print_info "Running compose-setup to initialize tables..."
+      nix run .#compose-setup || true
+      sleep 10  # Give Kafka consumer time to start
+
       # Step 2: Wait for services (max 120s)
       print_info "Waiting for services to be ready..."
       for i in {1..24}; do
@@ -155,8 +205,8 @@ in
       # Step 3: Verify components
       print_info "Verifying components..."
 
-      # Check containers
-      for svc in clickhouse fluentbit loggen hyperdx mongodb; do
+      # Check containers (including GDP components)
+      for svc in clickhouse fluentbit loggen hyperdx mongodb redpanda gdp; do
         if docker ps --format '{{.Names}}' | grep -q "otel-$svc"; then
           print_pass "$svc container running"
           record_test pass
@@ -197,6 +247,47 @@ in
         fi
       fi
 
+      # Step 6: Verify GDP pipeline
+      print_info "Verifying GDP pipeline..."
+      sleep 60  # Wait for GDP to collect and publish metrics (Kafka consumer needs time)
+
+      # Check GDP table exists
+      if check_gdp_table_exists "$CLICKHOUSE_URL"; then
+        print_pass "GDP table gdp.ProtobufSingle exists"
+        record_test pass
+      else
+        print_fail "GDP table gdp.ProtobufSingle not found"
+        record_test fail
+      fi
+
+      # Check GDP metrics are being collected
+      if check_gdp_pipeline "$CLICKHOUSE_URL"; then
+        gdp_count=$(curl -s "$CLICKHOUSE_URL/?query=SELECT+count()+FROM+gdp.ProtobufSingle" 2>/dev/null || echo 0)
+        print_pass "GDP metrics in ClickHouse: $gdp_count"
+        record_test pass
+      else
+        print_fail "No GDP metrics in ClickHouse"
+        record_test fail
+      fi
+
+      # Check metrics are growing (Kafka consumer working)
+      if wait_for_gdp_metrics "$CLICKHOUSE_URL"; then
+        print_pass "GDP metrics count increasing (Kafka consumer working)"
+        record_test pass
+      else
+        print_fail "GDP metrics count not increasing"
+        record_test fail
+      fi
+
+      # Check Kafka consumer has no exceptions
+      if check_kafka_consumer "$CLICKHOUSE_URL"; then
+        print_pass "Kafka consumer has no exceptions"
+        record_test pass
+      else
+        print_fail "Kafka consumer has exceptions"
+        record_test fail
+      fi
+
       # Step 7: Cleanup
       print_info "Stopping Docker Compose..."
       nix run .#compose-down
@@ -223,9 +314,9 @@ in
       print_pass "Minikube started"
       record_test pass
 
-      # Step 2: Load images
+      # Step 2: Load images (including GDP)
       print_info "Loading container images..."
-      for img in loggen fluentbit clickhouse mongodb hyperdx; do
+      for img in loggen fluentbit clickhouse mongodb hyperdx gdp; do
         nix build ".#''${img}-image" -o "/tmp/''${img}-image"
         minikube image load "/tmp/''${img}-image"
       done
@@ -265,7 +356,9 @@ in
 
       # Step 5: Verify log flow
       print_info "Verifying log pipeline..."
-      sleep 15  # Let some logs accumulate
+      # Wait for OTel collector to stabilize (it may restart while waiting for ClickHouse)
+      kubectl wait --for=condition=ready pod -l app=otel-collector -n $NAMESPACE --timeout=120s 2>/dev/null || true
+      sleep 30  # Let logs accumulate after OTel collector stabilizes
       LOG_COUNT=$(kubectl exec -n $NAMESPACE clickhouse-0 -- \
         clickhouse-client --query "SELECT count() FROM otel_logs" 2>/dev/null || echo 0)
       if [ "$LOG_COUNT" -gt 0 ]; then
@@ -278,7 +371,7 @@ in
 
       # Step 6: Verify all three logging methods (using Body content to identify pipeline)
       print_info "Verifying all three logging pipelines..."
-      sleep 30  # Wait for all methods to produce logs
+      sleep 45  # Wait for all methods to produce logs (OTel collector needs extra time)
 
       # FluentBit logs contain "FluentBit" in body
       count=$(kubectl exec -n $NAMESPACE clickhouse-0 -- \
@@ -333,6 +426,78 @@ in
         ORDER BY avg_latency_ms
         FORMAT PrettyCompact
       " 2>/dev/null || echo "(latency query failed)"
+
+      # Step 8: Verify GDP pipeline
+      print_info "Verifying GDP pipeline..."
+
+      # Check Redpanda pod ready
+      if kubectl wait --for=condition=ready pod -l app=redpanda -n $NAMESPACE --timeout=120s 2>/dev/null; then
+        print_pass "Redpanda pod ready"
+        record_test pass
+      else
+        print_fail "Redpanda pod not ready"
+        record_test fail
+      fi
+
+      # Check GDP pod ready
+      if kubectl wait --for=condition=ready pod -l app=gdp -n $NAMESPACE --timeout=60s 2>/dev/null; then
+        print_pass "GDP pod ready"
+        record_test pass
+      else
+        print_fail "GDP pod not ready"
+        record_test fail
+      fi
+
+      # Wait for GDP metrics to accumulate (GDP polls every 10s, Kafka consumer needs time to stabilize)
+      sleep 90
+
+      # Check GDP table exists
+      gdp_table=$(kubectl exec -n $NAMESPACE clickhouse-0 -- \
+        clickhouse-client --query "SELECT count() FROM system.tables WHERE database='gdp' AND name='ProtobufSingle'" 2>/dev/null || echo 0)
+      if [ "$gdp_table" = "1" ]; then
+        print_pass "GDP table gdp.ProtobufSingle exists"
+        record_test pass
+      else
+        print_fail "GDP table gdp.ProtobufSingle not found"
+        record_test fail
+      fi
+
+      # Check GDP metrics are being collected
+      gdp_count=$(kubectl exec -n $NAMESPACE clickhouse-0 -- \
+        clickhouse-client --query "SELECT count() FROM gdp.ProtobufSingle" 2>/dev/null || echo 0)
+      gdp_count=''${gdp_count:-0}
+      if [ "$gdp_count" -gt 0 ]; then
+        print_pass "GDP metrics in ClickHouse: $gdp_count"
+        record_test pass
+      else
+        print_fail "No GDP metrics in ClickHouse"
+        record_test fail
+      fi
+
+      # Check metrics are growing (wait for another poll cycle)
+      sleep 20
+      gdp_count_new=$(kubectl exec -n $NAMESPACE clickhouse-0 -- \
+        clickhouse-client --query "SELECT count() FROM gdp.ProtobufSingle" 2>/dev/null || echo 0)
+      gdp_count_new=''${gdp_count_new:-0}
+      if [ "$gdp_count_new" -gt "$gdp_count" ]; then
+        print_pass "GDP metrics count increasing (Kafka consumer working)"
+        record_test pass
+      else
+        print_fail "GDP metrics count not increasing"
+        record_test fail
+      fi
+
+      # Check Kafka consumer has no exceptions
+      kafka_exceptions=$(kubectl exec -n $NAMESPACE clickhouse-0 -- \
+        clickhouse-client --query "SELECT sum(length(exceptions.text)) FROM system.kafka_consumers" 2>/dev/null || echo 0)
+      kafka_exceptions=''${kafka_exceptions:-0}
+      if [ "$kafka_exceptions" = "0" ]; then
+        print_pass "Kafka consumer has no exceptions"
+        record_test pass
+      else
+        print_fail "Kafka consumer has exceptions"
+        record_test fail
+      fi
 
       # Step 9: Cleanup
       print_info "Cleaning up Minikube..."
@@ -467,7 +632,81 @@ in
         done
       fi
 
-      # Step 7: Cleanup
+      # Step 7: Verify GDP pipeline
+      if [ "''${PODS_READY:-false}" != "true" ]; then
+        print_fail "Cannot check GDP pipeline - pods not ready"
+        record_test fail
+      else
+        print_info "Verifying GDP pipeline..."
+
+        # Check Redpanda pod ready
+        if $SSH_CMD 'kubectl wait --for=condition=ready pod -l app=redpanda -n otel-demo --timeout=120s' 2>/dev/null; then
+          print_pass "Redpanda pod ready"
+          record_test pass
+        else
+          print_fail "Redpanda pod not ready"
+          record_test fail
+        fi
+
+        # Check GDP pod ready
+        if $SSH_CMD 'kubectl wait --for=condition=ready pod -l app=gdp -n otel-demo --timeout=60s' 2>/dev/null; then
+          print_pass "GDP pod ready"
+          record_test pass
+        else
+          print_fail "GDP pod not ready"
+          record_test fail
+        fi
+
+        # Wait for GDP metrics to accumulate (GDP polls every 10s, need time for Kafka consumer)
+        sleep 60
+
+        # Check GDP table exists
+        gdp_table=$($SSH_CMD 'kubectl exec -n otel-demo clickhouse-0 -- clickhouse-client --query "SELECT count() FROM system.tables WHERE database='"'"'gdp'"'"' AND name='"'"'ProtobufSingle'"'"'" 2>/dev/null || echo 0' 2>/dev/null | tail -1 | tr -d '[:space:]')
+        gdp_table=''${gdp_table:-0}
+        if [ "$gdp_table" = "1" ]; then
+          print_pass "GDP table gdp.ProtobufSingle exists"
+          record_test pass
+        else
+          print_fail "GDP table gdp.ProtobufSingle not found"
+          record_test fail
+        fi
+
+        # Check GDP metrics are being collected
+        gdp_count=$($SSH_CMD 'kubectl exec -n otel-demo clickhouse-0 -- clickhouse-client --query "SELECT count() FROM gdp.ProtobufSingle" 2>/dev/null || echo 0' 2>/dev/null | tail -1 | tr -d '[:space:]')
+        gdp_count=''${gdp_count:-0}
+        if [ "$gdp_count" -gt 0 ]; then
+          print_pass "GDP metrics in ClickHouse: $gdp_count"
+          record_test pass
+        else
+          print_fail "No GDP metrics in ClickHouse"
+          record_test fail
+        fi
+
+        # Check metrics are growing (wait for another poll cycle)
+        sleep 20
+        gdp_count_new=$($SSH_CMD 'kubectl exec -n otel-demo clickhouse-0 -- clickhouse-client --query "SELECT count() FROM gdp.ProtobufSingle" 2>/dev/null || echo 0' 2>/dev/null | tail -1 | tr -d '[:space:]')
+        gdp_count_new=''${gdp_count_new:-0}
+        if [ "$gdp_count_new" -gt "$gdp_count" ]; then
+          print_pass "GDP metrics count increasing (Kafka consumer working)"
+          record_test pass
+        else
+          print_fail "GDP metrics count not increasing"
+          record_test fail
+        fi
+
+        # Check Kafka consumer has no exceptions
+        kafka_exceptions=$($SSH_CMD 'kubectl exec -n otel-demo clickhouse-0 -- clickhouse-client --query "SELECT countIf(length(exceptions.text)>0) FROM system.kafka_consumers" 2>/dev/null || echo 0' 2>/dev/null | tail -1 | tr -d '[:space:]')
+        kafka_exceptions=''${kafka_exceptions:-0}
+        if [ "$kafka_exceptions" = "0" ]; then
+          print_pass "Kafka consumer has no exceptions"
+          record_test pass
+        else
+          print_fail "Kafka consumer has exceptions"
+          record_test fail
+        fi
+      fi
+
+      # Step 8: Cleanup
       print_info "Stopping MicroVM..."
       if [ -n "''${VM_PID:-}" ] && kill -0 "$VM_PID" 2>/dev/null; then
         kill "$VM_PID" 2>/dev/null || true

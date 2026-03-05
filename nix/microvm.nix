@@ -1,8 +1,17 @@
+# MicroVM configuration with embedded Minikube
+#
+# Uses the shared minikube module from nix/lib/minikube.nix for systemd services.
+# This ensures consistent orchestration between host minikube and microvm minikube.
+#
 { config, lib, pkgs, self, flake-inputs, k8sManifestsPath, ... }:
 
 let
   # Import port configuration
   ports = import ./ports.nix;
+  constants = import ./constants.nix { inherit pkgs; };
+
+  # Import the unified minikube module
+  minikubeLib = import ./lib/minikube.nix { inherit pkgs lib; };
 
   # Access flake packages for this system
   packages = self.packages.x86_64-linux;
@@ -12,6 +21,12 @@ let
     mkdir -p $out
     cp -r ${k8sManifestsPath}/* $out/
   '';
+
+  # Generate systemd services from the unified minikube module
+  minikubeServices = minikubeLib.mkSystemdServices {
+    inherit packages k8sManifests;
+  };
+
 in
 {
   # MicroVM configuration
@@ -19,9 +34,9 @@ in
     # Use QEMU hypervisor
     hypervisor = "qemu";
 
-    # Resource allocation - 8GB RAM, 4 CPUs as specified
-    mem = 8192;
-    vcpu = 4;
+    # Resource allocation from shared constants
+    mem = minikubeLib.resources.memoryMb;
+    vcpu = minikubeLib.resources.cpus;
 
     # Storage volumes
     volumes = [
@@ -60,10 +75,35 @@ in
 
     # Graphics disabled (headless)
     graphics.enable = false;
+
+    # QEMU configuration for dual serial consoles
+    qemu = {
+      # Disable default serial console (we configure TCP-accessible ones)
+      serialConsole = false;
+
+      extraArgs = [
+        # VM identification (for ps/pgrep matching)
+        "-name" "otel-demo,process=otel-demo"
+
+        # Serial console on TCP (ttyS0) - slow but early boot access
+        "-serial" "tcp:127.0.0.1:${toString ports.console.serial},server,nowait"
+
+        # Virtio console (hvc0) - high-speed, requires drivers
+        "-device" "virtio-serial-pci"
+        "-chardev" "socket,id=virtcon,port=${toString ports.console.virtio},host=127.0.0.1,server=on,wait=off"
+        "-device" "virtconsole,chardev=virtcon"
+      ];
+    };
   };
 
   # NixOS configuration
   system.stateVersion = "24.05";
+
+  # Console output configuration - send to both serial and virtio
+  boot.kernelParams = [
+    "console=ttyS0,115200"  # Serial first (early boot messages)
+    "console=hvc0"          # Virtio second (becomes primary after driver loads)
+  ];
 
   # Basic system configuration
   networking = {
@@ -125,138 +165,11 @@ in
     clickhouse
   ];
 
-  # Systemd service to start Minikube
-  systemd.services.minikube-start = {
-    description = "Start Minikube Kubernetes Cluster";
-    after = [ "docker.service" "network-online.target" ];
-    wants = [ "network-online.target" ];
-    wantedBy = [ "multi-user.target" ];
-
-    path = [ pkgs.docker ];
-
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      User = "root";
-      Environment = "HOME=/root";
-      ExecStartPre = "${pkgs.coreutils}/bin/sleep 5"; # Wait for docker
-    };
-
-    script = ''
-      # Check if minikube is already running
-      if ${pkgs.minikube}/bin/minikube status 2>/dev/null | grep -q "Running"; then
-        echo "Minikube already running"
-        exit 0
-      fi
-
-      # Start minikube with docker driver (--force needed for root)
-      ${pkgs.minikube}/bin/minikube start \
-        --driver=docker \
-        --cpus=3 \
-        --memory=6g \
-        --force \
-        --wait=all
-    '';
-
-    preStop = ''
-      ${pkgs.minikube}/bin/minikube stop || true
-    '';
-  };
-
-  # Systemd service to load container images
-  systemd.services.load-container-images = {
-    description = "Load OCI images into Minikube";
-    after = [ "minikube-start.service" ];
-    requires = [ "minikube-start.service" ];
-    wantedBy = [ "multi-user.target" ];
-
-    path = [ pkgs.docker ];
-
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      User = "root";
-      Environment = "HOME=/root";
-    };
-
-    script = ''
-      set -e
-
-      # Wait for minikube to be ready
-      ${pkgs.minikube}/bin/minikube status || exit 1
-
-      echo "Loading container images into Minikube..."
-
-      # Load each image into minikube's docker daemon
-      echo "Loading loggen..."
-      ${pkgs.minikube}/bin/minikube image load ${packages.loggen-image}
-
-      echo "Loading fluentbit..."
-      ${pkgs.minikube}/bin/minikube image load ${packages.fluentbit-image}
-
-      echo "Loading clickhouse..."
-      ${pkgs.minikube}/bin/minikube image load ${packages.clickhouse-image}
-
-      echo "Loading mongodb..."
-      ${pkgs.minikube}/bin/minikube image load ${packages.mongodb-image}
-
-      echo "Loading hyperdx..."
-      ${pkgs.minikube}/bin/minikube image load ${packages.hyperdx-image}
-
-      echo "All images loaded. Verifying..."
-      ${pkgs.minikube}/bin/minikube image ls
-    '';
-  };
-
-  # Systemd service to deploy Kubernetes manifests
-  systemd.services.deploy-k8s-manifests = {
-    description = "Deploy Kubernetes manifests";
-    after = [ "load-container-images.service" ];
-    requires = [ "load-container-images.service" ];
-    wantedBy = [ "multi-user.target" ];
-
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-      User = "root";
-      Environment = "HOME=/root";
-    };
-
-    script = ''
-      set -e
-
-      # Wait for kubernetes to be ready
-      ${pkgs.kubectl}/bin/kubectl wait --for=condition=Ready nodes --all --timeout=120s
-
-      echo "Deploying k8s manifests with kustomize..."
-      ${pkgs.kubectl}/bin/kubectl apply -k ${k8sManifests}
-
-      echo "Waiting for deployments to be ready..."
-      ${pkgs.kubectl}/bin/kubectl -n otel-demo wait --for=condition=available deployment --all --timeout=300s || true
-
-      echo "Kubernetes manifests deployed"
-      ${pkgs.kubectl}/bin/kubectl -n otel-demo get all
-    '';
-  };
-
-  # Minikube tunnel service to expose NodePorts on VM localhost
-  systemd.services.minikube-tunnel = {
-    description = "Minikube Tunnel for NodePort Access";
-    after = [ "deploy-k8s-manifests.service" ];
-    requires = [ "deploy-k8s-manifests.service" ];
-    wantedBy = [ "multi-user.target" ];
-
-    path = [ pkgs.docker ];
-
-    serviceConfig = {
-      Type = "simple";
-      User = "root";
-      Environment = "HOME=/root";
-      ExecStart = "${pkgs.minikube}/bin/minikube tunnel --cleanup=true";
-      Restart = "on-failure";
-      RestartSec = "10s";
-    };
-  };
+  # Systemd services from unified minikube module
+  systemd.services.minikube-start = minikubeServices.minikube-start;
+  systemd.services.load-container-images = minikubeServices.load-container-images;
+  systemd.services.deploy-k8s-manifests = minikubeServices.deploy-k8s-manifests;
+  systemd.services.minikube-tunnel = minikubeServices.minikube-tunnel;
 
   # Enable nix flakes in the VM
   nix.settings.experimental-features = [ "nix-command" "flakes" ];

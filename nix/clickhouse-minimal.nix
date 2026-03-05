@@ -10,8 +10,9 @@ pkgs.clickhouse.overrideAttrs (oldAttrs: {
   cmakeFlags = (oldAttrs.cmakeFlags or [ ]) ++ [
     # ============================================
     # DISABLE EXTERNAL DATABASE INTEGRATIONS
+    # (Kafka enabled for GDP integration)
     # ============================================
-    "-DENABLE_KAFKA=OFF" # Kafka table engine
+    # "-DENABLE_KAFKA=OFF" # Kafka table engine - ENABLED for GDP
     "-DENABLE_AMQPCPP=OFF" # RabbitMQ
     "-DENABLE_NATS=OFF" # NATS
     "-DENABLE_MYSQL=OFF" # MySQL engine
@@ -32,12 +33,13 @@ pkgs.clickhouse.overrideAttrs (oldAttrs: {
 
     # ============================================
     # DISABLE UNUSED DATA FORMATS
+    # (Protobuf enabled for GDP integration)
     # ============================================
     "-DENABLE_PARQUET=OFF" # Parquet (includes Arrow)
     "-DENABLE_ARROW_FLIGHT=OFF" # Arrow Flight
     "-DENABLE_AVRO=OFF" # Apache Avro
     "-DENABLE_CAPNP=OFF" # Cap'n Proto
-    "-DENABLE_PROTOBUF=OFF" # Protocol Buffers
+    # "-DENABLE_PROTOBUF=OFF" # Protocol Buffers - ENABLED for GDP
     "-DENABLE_MSGPACK=OFF" # MessagePack
 
     # ============================================

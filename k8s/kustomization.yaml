@@ -11,6 +11,12 @@ resources:
   - otel-collector/configmap.yaml
   - otel-collector/deployment.yaml
   - otel-collector/service.yaml
+  # GDP Integration: Redpanda (Kafka-compatible) + GDP collector
+  - redpanda/statefulset.yaml
+  - redpanda-console/deployment.yaml
+  - gdp/configmap.yaml
+  - gdp/deployment.yaml
+  # ClickHouse (includes GDP Kafka tables)
   - clickhouse/configmap.yaml
   - clickhouse/statefulset.yaml
   # MongoDB backend (required for HyperDX - FerretDB lacks TTL index support)

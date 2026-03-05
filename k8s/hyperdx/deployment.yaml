@@ -19,8 +19,11 @@ spec:
     spec:
       containers:
         - name: hyperdx
+          # TODO: Switch to Nix-built hyperdx:latest once proto file issue is fixed
+          # The Nix build needs to copy proto files to build/src/opamp/proto/
+          # For now, use upstream Docker Hub image for reliability
           image: hyperdx/hyperdx:latest
-          imagePullPolicy: IfNotPresent  # Pull from registry
+          imagePullPolicy: IfNotPresent
           env:
             # MongoDB backend for session storage (required - FerretDB lacks TTL index support)
             - name: MONGO_URI
@@ -73,10 +76,10 @@ spec:
             httpGet:
               path: /health
               port: api
-            initialDelaySeconds: 30
+            initialDelaySeconds: 60
             periodSeconds: 10
             timeoutSeconds: 5
-            failureThreshold: 3
+            failureThreshold: 6
           resources:
             requests:
               memory: "512Mi"

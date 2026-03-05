@@ -4,18 +4,33 @@
 , buildEnv
 , writeShellScript
 , runCommand
+, fetchFromGitHub ? pkgs.fetchFromGitHub
+, buildGoModule ? pkgs.buildGoModule
+, writeText ? pkgs.writeText
 , goApp
 , fluentbit
 , clickhouse
 , hyperdx
+# Pulled images (external projects too complex to build from source)
+, otelCollector ? null
+, redpanda ? null
 }:
 
 let
   # Import port configuration
   ports = import ./ports.nix;
 
+  # Import constants
+  constants = import ./constants.nix { inherit pkgs; };
+
   # Import container factory
   containerLib = import ./lib/containers.nix { inherit lib pkgs; };
+
+  # Import GDP module
+  gdp = import ./gdp.nix {
+    inherit lib pkgs fetchFromGitHub buildGoModule writeText runCommand;
+    inherit constants containerLib ports;
+  };
 
   # ============================================
   # Standard Image Configurations
@@ -95,10 +110,11 @@ let
 
     # ClickHouse uses nix/clickhouse.nix module for configuration
     # includeShell is needed for K8s init script that creates tables on startup
+    # includeUsers is needed for ClickHouse user name resolution
     clickhouse = {
       packages = [ clickhouse ];
       pathsToLink = [ "/bin" "/etc" "/share" "/opt" ];
-      extraDirs = [ "var/lib/clickhouse/tmp" "var/lib/clickhouse/user_files" "var/log/clickhouse-server" ];
+      extraDirs = [ "var/lib/clickhouse/tmp" "var/lib/clickhouse/user_files" "var/log/clickhouse-server" "var/lib/clickhouse/format_schemas" ];
       entrypoint = [ "/bin/clickhouse-server" ];
       cmd = [ "--config-file=/opt/clickhouse-config/config.xml" ];
       env = [ "CLICKHOUSE_DB=default" ];
@@ -106,7 +122,11 @@ let
       volumes = [ "/var/lib/clickhouse" ];
       description = "ClickHouse for OTel logs storage";
       includeShell = true;
+      includeUsers = true;
     };
+
+    # GDP - Go Data Pipeline (Prometheus metrics to Kafka/ClickHouse)
+    gdp = gdp.imageConfig;
   };
 
   # Generate standard images using the factory
@@ -115,6 +135,18 @@ let
       containerLib.mkImage (cfg // { inherit name; })
     )
     imageConfigs;
+
+  # ============================================
+  # Pulled Images (external projects)
+  # ============================================
+  # These are pulled from Docker registries with locked digests for reproducibility.
+  # Building from source is impractical (C++ Seastar for Redpanda, OCB codegen for OTel).
+  pulledImages = lib.optionalAttrs (otelCollector != null) {
+    otel-collector = otelCollector.image;
+  } // lib.optionalAttrs (redpanda != null) {
+    redpanda = redpanda.image;
+    redpanda-console = redpanda.consoleImage;
+  };
 
   # ============================================
   # All Images Combined
@@ -126,6 +158,12 @@ let
     { name = "mongodb"; image = standardImages.mongodb; }
     { name = "ferretdb"; image = standardImages.ferretdb; }
     { name = "hyperdx"; image = standardImages.hyperdx; }
+    { name = "gdp"; image = standardImages.gdp; }
+  ] ++ lib.optionals (otelCollector != null) [
+    { name = "otel-collector"; image = otelCollector.image; }
+  ] ++ lib.optionals (redpanda != null) [
+    { name = "redpanda"; image = redpanda.image; }
+    { name = "redpanda-console"; image = redpanda.consoleImage; }
   ];
 
   # ============================================
@@ -140,7 +178,7 @@ let
     '') allImagesList}
     echo ""
     echo "Images loaded successfully:"
-    ${pkgs.docker}/bin/docker images | grep -E "(loggen|fluentbit|clickhouse|mongodb|ferretdb|hyperdx)" || true
+    ${pkgs.docker}/bin/docker images | grep -E "(loggen|fluentbit|clickhouse|mongodb|ferretdb|hyperdx|gdp)" || true
   '';
 
   # Bundle all images
@@ -159,5 +197,15 @@ in
   mongodbImage = standardImages.mongodb;
   ferretdbImage = standardImages.ferretdb;
   hyperdxImage = standardImages.hyperdx;
-  inherit loadScript allImages;
+  gdpImage = standardImages.gdp;
+
+  # Pulled images (external projects)
+  otelCollectorImage = if otelCollector != null then otelCollector.image else null;
+  redpandaImage = if redpanda != null then redpanda.image else null;
+  redpandaConsoleImage = if redpanda != null then redpanda.consoleImage else null;
+
+  # GDP-related assets for docker-compose
+  inherit (gdp) gdpInitSql formatSchemas kafkaConfig;
+
+  inherit loadScript allImages pulledImages;
 }

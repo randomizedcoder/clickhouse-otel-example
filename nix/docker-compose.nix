@@ -1,13 +1,40 @@
 # Docker Compose Generator
 #
-# Generates docker-compose.yaml with configuration from ports.nix
+# Generates docker-compose.yaml with configuration from ports.nix and constants.nix
 # This allows running the stack directly on the host without a MicroVM.
 #
 # Note: Uses official images where the Nix-built ones have K8s-specific configs.
-{ lib, pkgs, writeText }:
+# GDP Integration: Adds Redpanda (Kafka), Redpanda Console, and GDP services
+{ lib, pkgs, writeText, fetchFromGitHub ? pkgs.fetchFromGitHub, buildGoModule ? pkgs.buildGoModule, runCommand ? pkgs.runCommand }:
 
 let
   ports = import ./ports.nix;
+  constants = import ./constants.nix { inherit pkgs; };
+  containerLib = import ./lib/containers.nix { inherit lib pkgs; };
+
+  # Import GDP module for SQL init and configs
+  gdp = import ./gdp.nix {
+    inherit lib pkgs fetchFromGitHub buildGoModule writeText runCommand;
+    inherit constants containerLib ports;
+  };
+
+  # ClickHouse users config - allow default user from any host without password
+  # Required for official ClickHouse image (25.6) which restricts default to localhost
+  clickhouseUsersConfig = writeText "default-allow-all.xml" ''
+    <clickhouse>
+      <users>
+        <default>
+          <password></password>
+          <networks>
+            <ip>::/0</ip>
+          </networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <access_management>1</access_management>
+        </default>
+      </users>
+    </clickhouse>
+  '';
 
   # Lua transform script for converting logs to OTel format
   luaTransform = writeText "transform.lua" ''
@@ -140,30 +167,155 @@ let
     #   nix run .#compose-logs  # View logs
 
     services:
-      clickhouse:
-        image: clickhouse/clickhouse-server:latest
-        container_name: otel-clickhouse
+      # ============================================
+      # Redpanda (Kafka-compatible broker) - GDP Integration
+      # ============================================
+      ${constants.serviceNames.redpanda}:
+        image: ${constants.externalImages.redpanda}
+        container_name: ${constants.containerNames.redpanda}
+        command:
+          - redpanda
+          - start
+          - --kafka-addr=internal://0.0.0.0:${toString ports.services.redpandaKafkaInternal},external://0.0.0.0:${toString ports.services.redpandaKafkaExternal}
+          - --advertise-kafka-addr=internal://${constants.serviceNames.redpanda}:${toString ports.services.redpandaKafkaInternal},external://localhost:${toString ports.services.redpandaKafkaExternal}
+          - --schema-registry-addr=internal://0.0.0.0:${toString ports.services.redpandaSchemaRegistryInternal},external://0.0.0.0:${toString ports.services.redpandaSchemaRegistryExternal}
+          - --rpc-addr=${constants.serviceNames.redpanda}:${toString ports.services.redpandaRpc}
+          - --advertise-rpc-addr=${constants.serviceNames.redpanda}:${toString ports.services.redpandaRpc}
+          - --mode=dev-container
+          - --smp=1
+          - --default-log-level=info
+        ports:
+          - "${toString ports.compose.redpandaKafka}:${toString ports.services.redpandaKafkaInternal}"
+          - "${toString ports.compose.redpandaSchemaRegistry}:${toString ports.services.redpandaSchemaRegistryExternal}"
+        volumes:
+          - redpanda-data:/var/lib/redpanda/data
+        healthcheck:
+          test: ["CMD", "rpk", "cluster", "health"]
+          interval: 10s
+          timeout: 5s
+          retries: 5
+        networks:
+          - ${constants.network.name}
+
+      # ============================================
+      # Redpanda Console (Web UI) - GDP Integration
+      # ============================================
+      ${constants.serviceNames.redpandaConsole}:
+        image: ${constants.externalImages.redpandaConsole}
+        container_name: ${constants.containerNames.redpandaConsole}
+        ports:
+          - "${toString ports.compose.redpandaConsole}:${toString ports.services.redpandaConsole}"
+        entrypoint: /bin/sh
+        command: -c 'echo "$$CONSOLE_CONFIG_FILE" > /tmp/config.yml; /app/console'
+        environment:
+          CONFIG_FILEPATH: /tmp/config.yml
+          CONSOLE_CONFIG_FILE: |
+            kafka:
+              brokers: ["${constants.serviceNames.redpanda}:${toString ports.services.redpandaKafkaInternal}"]
+              protobuf:
+                enabled: true
+                schemaRegistry:
+                  enabled: true
+              schemaRegistry:
+                enabled: true
+                urls: ["http://${constants.serviceNames.redpanda}:${toString ports.services.redpandaSchemaRegistryInternal}"]
+            redpanda:
+              adminApi:
+                enabled: true
+                urls: ["http://${constants.serviceNames.redpanda}:${toString ports.services.redpandaAdminApi}"]
+        depends_on:
+          ${constants.serviceNames.redpanda}:
+            condition: service_healthy
+        networks:
+          - ${constants.network.name}
+
+      # ============================================
+      # GDP (Go Data Pipeline) - Prometheus metrics to Kafka
+      # ============================================
+      ${constants.serviceNames.gdp}:
+        image: gdp:latest
+        container_name: ${constants.containerNames.gdp}
+        command:
+          - -dest=kafka:${constants.serviceNames.redpanda}:${toString ports.services.redpandaKafkaInternal}
+          - -kafkaSchemaUrl=http://${constants.serviceNames.redpanda}:${toString ports.services.redpandaSchemaRegistryInternal}
+          - -frequency=${constants.gdpConfig.pollFrequency}
+          - -timeout=${constants.gdpConfig.pollTimeout}
+          - -d=${constants.gdpConfig.debugLevel}
+        volumes:
+          - ${gdp.protoFiles}/prometheus.proto:/prometheus.proto:ro
+          - ${gdp.protoFiles}/prometheus_protolist.proto:/prometheus_protolist.proto:ro
+        ports:
+          - "${toString ports.compose.gdpPrometheus}:${toString ports.services.gdpPrometheus}"
+        restart: unless-stopped
+        deploy:
+          resources:
+            limits:
+              cpus: "1"
+              memory: 150M
+        depends_on:
+          ${constants.serviceNames.redpanda}:
+            condition: service_healthy
+        networks:
+          - ${constants.network.name}
+
+      # ============================================
+      # ClickHouse 25.6 - Using external image for HyperDX compatibility
+      # NOTE: ClickHouse 26.x has EXPLAIN ESTIMATE syntax errors with HyperDX
+      # NOTE: Official image entrypoint chowns /var/lib/clickhouse, so we use
+      #       /etc/clickhouse-server for configs and avoid ro mounts there
+      # ============================================
+      ${constants.serviceNames.clickhouse}:
+        image: ${constants.externalImages.clickhouse}
+        container_name: ${constants.containerNames.clickhouse}
         ports:
           - "${toString ports.compose.clickhouseHttp}:${toString ports.services.clickhouseHttp}"
           - "${toString ports.compose.clickhouseNative}:${toString ports.services.clickhouseNative}"
         volumes:
           - clickhouse-data:/var/lib/clickhouse
-          - ${clickhouseInit}:/docker-entrypoint-initdb.d/init.sql:ro
+          - ${gdp.kafkaConfig}/kafka.xml:/etc/clickhouse-server/config.d/kafka.xml:ro
+          - ${clickhouseUsersConfig}:/etc/clickhouse-server/users.d/default-allow-all.xml:ro
         environment:
-          - CLICKHOUSE_DB=default
-          - CLICKHOUSE_USER=default
-          - CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT=1
+          - CLICKHOUSE_DB=${constants.databases.otelLogs}
         healthcheck:
           test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
           interval: 5s
           timeout: 5s
           retries: 10
+        depends_on:
+          ${constants.serviceNames.redpanda}:
+            condition: service_healthy
         networks:
-          - otel-demo
+          - ${constants.network.name}
 
-      mongodb:
+      # ============================================
+      # ClickHouse - Nix-built (DISABLED: 26.x incompatible with HyperDX)
+      # ============================================
+      # ${constants.serviceNames.clickhouse}:
+      #   image: clickhouse:latest
+      #   container_name: ${constants.containerNames.clickhouse}
+      #   ports:
+      #     - "${toString ports.compose.clickhouseHttp}:${toString ports.services.clickhouseHttp}"
+      #     - "${toString ports.compose.clickhouseNative}:${toString ports.services.clickhouseNative}"
+      #   volumes:
+      #     - clickhouse-data:/var/lib/clickhouse
+      #     - ${gdp.formatSchemas}:/var/lib/clickhouse/format_schemas:ro
+      #     - ${gdp.kafkaConfig}/kafka.xml:/opt/clickhouse-config/kafka.xml:ro
+      #   environment:
+      #     - CLICKHOUSE_DB=${constants.databases.otelLogs}
+      #   healthcheck:
+      #     test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      #     interval: 5s
+      #     timeout: 5s
+      #     retries: 10
+      #   depends_on:
+      #     ${constants.serviceNames.redpanda}:
+      #       condition: service_healthy
+      #   networks:
+      #     - ${constants.network.name}
+
+      ${constants.serviceNames.mongodb}:
         image: mongo:7
-        container_name: otel-mongodb
+        container_name: ${constants.containerNames.mongodb}
         ports:
           - "${toString ports.compose.mongodb}:${toString ports.services.mongodb}"
         volumes:
@@ -175,11 +327,11 @@ let
           timeout: 5s
           retries: 10
         networks:
-          - otel-demo
+          - ${constants.network.name}
 
-      fluentbit:
+      ${constants.serviceNames.fluentbit}:
         image: fluent/fluent-bit:latest
-        container_name: otel-fluentbit
+        container_name: ${constants.containerNames.fluentbit}
         ports:
           - "${toString ports.services.fluentbitMetrics}:${toString ports.services.fluentbitMetrics}"
           - "24224:24224"
@@ -188,14 +340,14 @@ let
           - ${fluentbitParsers}:/fluent-bit/etc/parsers.conf:ro
           - ${luaTransform}:/fluent-bit/etc/transform.lua:ro
         depends_on:
-          clickhouse:
+          ${constants.serviceNames.clickhouse}:
             condition: service_healthy
         networks:
-          - otel-demo
+          - ${constants.network.name}
 
-      loggen:
+      ${constants.serviceNames.loggen}:
         image: loggen:latest
-        container_name: otel-loggen
+        container_name: ${constants.containerNames.loggen}
         environment:
           - LOGGEN_MAX_NUMBER=100
           - LOGGEN_NUM_STRINGS=10
@@ -212,25 +364,26 @@ let
             fluentd-max-retries: 30
             tag: loggen
         depends_on:
-          - fluentbit
+          - ${constants.serviceNames.fluentbit}
         networks:
-          - otel-demo
+          - ${constants.network.name}
 
-      hyperdx:
+      ${constants.serviceNames.hyperdx}:
+        # Using Docker Hub HyperDX
         image: hyperdx/hyperdx:latest
-        container_name: otel-hyperdx
-        # Override entrypoint: source original but override IS_LOCAL_APP_MODE after it sets REQUIRED_AUTH
+        container_name: ${constants.containerNames.hyperdx}
+        # Override entrypoint for IS_LOCAL_APP_MODE
         entrypoint: ["/bin/sh", "-c", "cp /etc/local/entry.sh /tmp/entry.sh && sed 's/REQUIRED_AUTH/DANGEROUSLY_is_local_app_mode💀/g' /etc/local/entry.sh > /tmp/entry.sh && chmod +x /tmp/entry.sh && exec /bin/sh /tmp/entry.sh"]
         environment:
-          - MONGO_URI=mongodb://mongodb:${toString ports.services.mongodb}/hyperdx
-          - CLICKHOUSE_HOST=clickhouse
+          - MONGO_URI=mongodb://${constants.serviceNames.mongodb}:${toString ports.services.mongodb}/${constants.databases.hyperdx}
+          - CLICKHOUSE_HOST=${constants.serviceNames.clickhouse}
           - CLICKHOUSE_PORT=${toString ports.services.clickhouseHttp}
           - CLICKHOUSE_USER=default
           - CLICKHOUSE_PASSWORD=
           - IS_LOCAL_APP_MODE=DANGEROUSLY_is_local_app_mode💀
           - FRONTEND_URL=http://${ports.externalHost}:${toString ports.compose.hyperdxApp}
           - NEXT_PUBLIC_API_URL=http://${ports.externalHost}:${toString ports.compose.hyperdxApi}
-          - DEFAULT_CONNECTIONS=[{"name":"Default","host":"http://clickhouse:${toString ports.services.clickhouseHttp}","username":"default","password":""}]
+          - DEFAULT_CONNECTIONS=[{"name":"Default","host":"http://${constants.serviceNames.clickhouse}:${toString ports.services.clickhouseHttp}","username":"default","password":""}]
           # TODO: Auto-config sources causes EXPLAIN ESTIMATE syntax errors in ClickHouse 26.x
           # Configure source manually via UI: Settings > Sources > Add source for default.otel_logs
           # - 'DEFAULT_SOURCES=[{"name":"OTel Logs","kind":"log","connection":"Default","from":{"databaseName":"default","tableName":"otel_logs"},"timestampValueExpression":"TimestampTime","displayedTimestampValueExpression":"Timestamp","bodyExpression":"Body","severityTextExpression":"SeverityText","serviceNameExpression":"ServiceName","traceIdExpression":"TraceId","spanIdExpression":"SpanId"}]'
@@ -240,20 +393,21 @@ let
           - "${toString ports.compose.hyperdxApi}:${toString ports.services.hyperdxApi}"
           - "${toString ports.compose.hyperdxApp}:${toString ports.services.hyperdxApp}"
         depends_on:
-          clickhouse:
+          ${constants.serviceNames.clickhouse}:
             condition: service_healthy
-          mongodb:
+          ${constants.serviceNames.mongodb}:
             condition: service_healthy
         networks:
-          - otel-demo
+          - ${constants.network.name}
 
     networks:
-      otel-demo:
-        driver: bridge
+      ${constants.network.name}:
+        driver: ${constants.network.driver}
 
     volumes:
       clickhouse-data:
       mongodb-data:
+      redpanda-data:
   '';
 
   # MongoDB init script - minimal init, let HyperDX handle user/team creation
@@ -334,25 +488,35 @@ let
       echo "=============================================="
       echo ""
       echo "ACCESS POINTS:"
-      echo "  HyperDX UI:      http://localhost:${toString ports.compose.hyperdxApp}"
-      echo "  HyperDX API:     http://localhost:${toString ports.compose.hyperdxApi}"
-      echo "  ClickHouse HTTP: http://localhost:${toString ports.compose.clickhouseHttp}"
+      echo "  HyperDX UI:         http://localhost:${toString ports.compose.hyperdxApp}"
+      echo "  HyperDX API:        http://localhost:${toString ports.compose.hyperdxApi}"
+      echo "  ClickHouse HTTP:    http://localhost:${toString ports.compose.clickhouseHttp}"
+      echo "  Redpanda Console:   http://localhost:${toString ports.compose.redpandaConsole}"
+      echo "  Redpanda Kafka:     localhost:${toString ports.compose.redpandaKafka}"
+      echo "  GDP Prometheus:     http://localhost:${toString ports.compose.gdpPrometheus}/metrics"
       echo ""
       echo "FIRST-TIME SETUP:"
       echo "  nix run .#compose-setup    # Create connection, source, and dashboard"
       echo ""
-      echo "VIEW LOGGEN LOGS:"
-      echo "  docker logs -f otel-loggen"
+      echo "VIEW LOGS:"
+      echo "  docker logs -f ${constants.containerNames.loggen}"
+      echo "  docker logs -f ${constants.containerNames.gdp}"
       echo ""
       echo "QUERY CLICKHOUSE:"
-      echo "  # Count logs"
+      echo "  # Count OTel logs"
       echo "  curl 'http://localhost:${toString ports.compose.clickhouseHttp}/?query=SELECT+count()+FROM+otel_logs'"
+      echo ""
+      echo "  # Count GDP metrics"
+      echo "  curl 'http://localhost:${toString ports.compose.clickhouseHttp}/?query=SELECT+count()+FROM+${constants.databases.gdp}.ProtobufSingle'"
       echo ""
       echo "  # View recent logs"
       echo "  curl 'http://localhost:${toString ports.compose.clickhouseHttp}/?query=SELECT+*+FROM+otel_logs+ORDER+BY+Timestamp+DESC+LIMIT+5+FORMAT+Pretty'"
       echo ""
       echo "  # Interactive CLI"
-      echo "  docker exec -it otel-clickhouse clickhouse-client"
+      echo "  docker exec -it ${constants.containerNames.clickhouse} clickhouse-client"
+      echo ""
+      echo "REDPANDA HEALTH:"
+      echo "  docker exec ${constants.containerNames.redpanda} rpk cluster health"
       echo ""
       echo "LIFECYCLE COMMANDS:"
       echo "  nix run .#compose-ps           # Check status"
@@ -638,16 +802,43 @@ let
     print("Setup complete!");
   '';
 
-  # Script to setup HyperDX with connection, source, and dashboard
+  # Script to setup GDP tables and HyperDX with connection, source, and dashboard
   composeSetup = pkgs.writeShellApplication {
     name = "compose-setup";
-    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.mongosh ];
+    runtimeInputs = [ pkgs.curl pkgs.jq pkgs.mongosh pkgs.docker ];
     text = ''
       set -euo pipefail
 
       API_URL="http://localhost:${toString ports.compose.hyperdxApi}"
       MONGO_URI="mongodb://localhost:${toString ports.compose.mongodb}/hyperdx"
+      CLICKHOUSE_URL="http://localhost:${toString ports.compose.clickhouseHttp}"
 
+      # ============================================
+      # 1. Setup GDP Tables in ClickHouse
+      # ============================================
+      echo "Setting up GDP tables..."
+
+      # Wait for ClickHouse to be ready
+      echo "Waiting for ClickHouse..."
+      for i in {1..30}; do
+        if curl -s "$CLICKHOUSE_URL/?query=SELECT+1" 2>/dev/null | grep -q "1"; then
+          echo "ClickHouse is ready"
+          break
+        fi
+        echo "  Waiting... ($i/30)"
+        sleep 2
+      done
+
+      # Create OTel logs table and GDP database/tables (idempotent)
+      echo "Creating ClickHouse tables..."
+      cat ${clickhouseInit} | docker exec -i ${constants.containerNames.clickhouse} clickhouse-client --multiquery
+      cat ${gdp.gdpInitSql} | docker exec -i ${constants.containerNames.clickhouse} clickhouse-client --multiquery
+      echo "ClickHouse tables created successfully"
+
+      # ============================================
+      # 2. Setup HyperDX
+      # ============================================
+      echo ""
       echo "Setting up HyperDX..."
 
       # Wait for HyperDX API to be ready
@@ -666,6 +857,9 @@ let
       mongosh "$MONGO_URI" --quiet ${setupJs}
 
       echo ""
+      echo "Setup complete!"
+      echo "  - OTel Logs: default.otel_logs (MergeTree)"
+      echo "  - GDP Tables: ${constants.databases.gdp}.ProtobufSingle (MergeTree + Kafka + MV)"
       echo "  - Connection: Default (http://clickhouse:8123)"
       echo "  - Source: OTel Logs (default.otel_logs)"
       echo "  - Dashboard: Loggen Metrics"

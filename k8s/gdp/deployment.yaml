@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gdp
+  namespace: otel-demo
+  labels:
+    app: gdp
+    app.kubernetes.io/name: gdp
+    app.kubernetes.io/component: metrics-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gdp
+  template:
+    metadata:
+      labels:
+        app: gdp
+    spec:
+      initContainers:
+        - name: wait-for-redpanda
+          image: clickhouse:latest
+          imagePullPolicy: Never
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Waiting for Redpanda to be ready (timeout 60s)..."
+              for i in {1..12}; do
+                if timeout 2 bash -c "echo > /dev/tcp/redpanda/9092" 2>/dev/null; then
+                  echo "Redpanda is ready"
+                  exit 0
+                fi
+                echo "Redpanda not ready, waiting... ($i/12)"
+                sleep 5
+              done
+              echo "Warning: Redpanda not available, proceeding anyway"
+              exit 0
+      containers:
+        - name: gdp
+          image: gdp:latest
+          imagePullPolicy: Never
+          args:
+            - -dest=kafka:redpanda:9092
+            - -kafkaSchemaUrl=http://redpanda:8081
+            - -frequency=10s
+            - -timeout=5s
+            - -d=11
+          ports:
+            - name: prometheus
+              containerPort: 8888
+              protocol: TCP
+          env:
+            - name: DEBUG_LEVEL
+              value: "11"
+            - name: POLL_FREQUENCY
+              value: "10s"
+            - name: POLL_TIMEOUT
+              value: "5s"
+            - name: KAFKA_PRODUCE_TIMEOUT
+              value: "2s"
+            - name: GOMAXPROCS
+              value: "2"
+          volumeMounts:
+            - name: proto-files
+              mountPath: /prometheus.proto
+              subPath: prometheus.proto
+            - name: proto-files
+              mountPath: /prometheus_protolist.proto
+              subPath: prometheus_protolist.proto
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: prometheus
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: prometheus
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "50m"
+            limits:
+              memory: "150Mi"
+              cpu: "500m"
+      volumes:
+        - name: proto-files
+          configMap:
+            name: gdp-proto-files
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gdp
+  namespace: otel-demo
+  labels:
+    app: gdp
+spec:
+  type: ClusterIP
+  ports:
+    - name: prometheus
+      port: 8888
+      targetPort: 8888
+      protocol: TCP
+  selector:
+    app: gdp

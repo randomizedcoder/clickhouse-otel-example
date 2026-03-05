@@ -15,9 +15,29 @@ spec:
         app: otel-collector
     spec:
       serviceAccountName: otel-collector
+      initContainers:
+        - name: wait-for-clickhouse
+          image: clickhouse:latest
+          imagePullPolicy: Never
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Waiting for ClickHouse to be ready (timeout 120s)..."
+              for i in {1..24}; do
+                if timeout 2 bash -c "echo > /dev/tcp/clickhouse/9000" 2>/dev/null; then
+                  echo "ClickHouse is ready"
+                  exit 0
+                fi
+                echo "ClickHouse not ready, waiting... ($i/24)"
+                sleep 5
+              done
+              echo "Warning: ClickHouse not available, proceeding anyway"
+              exit 0
       containers:
         - name: otel-collector
-          image: otel/opentelemetry-collector-contrib:0.96.0
+          image: otel-collector:0.96.0
+          imagePullPolicy: Never
           args:
             - --config=/etc/otelcol/config.yaml
           ports:

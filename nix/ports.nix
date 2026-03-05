@@ -29,6 +29,18 @@
 
     # SSH (inside VM)
     ssh = 22;
+
+    # GDP Integration - Redpanda (Kafka-compatible)
+    redpandaKafkaInternal = 9092;
+    redpandaKafkaExternal = 19092;
+    redpandaSchemaRegistryInternal = 8081;
+    redpandaSchemaRegistryExternal = 18081;
+    redpandaAdminApi = 9644;
+    redpandaRpc = 33145;
+    redpandaConsole = 8080;
+
+    # GDP (Prometheus metrics collector)
+    gdpPrometheus = 8888;
   };
 
   # ============================================
@@ -66,5 +78,31 @@
     mongodb = 37017;
     clickhouseHttp = 38123;
     clickhouseNative = 39000;
+
+    # GDP Integration
+    redpandaKafka = 39092;
+    redpandaSchemaRegistry = 38081;
+    redpandaConsole = 38085;
+    gdpPrometheus = 38888;
+  };
+
+  # ============================================
+  # Host Forwards (MicroVM -> Host) - GDP Integration
+  # Using 2XXXX prefix to avoid collisions
+  # ============================================
+  hostForwardsGdp = {
+    redpandaKafka = 29092;
+    redpandaSchemaRegistry = 28081;
+    redpandaConsole = 28085;
+    gdpPrometheus = 28888;
+  };
+
+  # ============================================
+  # Console Ports for MicroVM Serial Debugging
+  # Using 245XX prefix (following pcp pattern)
+  # ============================================
+  console = {
+    serial = 24500;  # ttyS0 - slow, early boot (TCP socket)
+    virtio = 24501;  # hvc0 - fast, after drivers (TCP socket)
   };
 }

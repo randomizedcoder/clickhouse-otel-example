@@ -1,6 +1,6 @@
 # ClickHouse OpenTelemetry Pipeline Demo
 
-**Last Updated:** 2026-03-01
+**Last Updated:** 2026-03-04
 
 A complete demonstration of an OpenTelemetry logs pipeline using Nix for reproducible builds. The pipeline collects JSON logs from a Go application, transforms them to OTel format via FluentBit, stores them in ClickHouse, and visualizes them with HyperDX.
 
@@ -54,10 +54,14 @@ All components are built reproducibly with Nix - no Docker Hub pulls required.
 |-----------|-------------|-------------|--------|
 | **loggen** | Go application generating random JSON logs | 3.3 MB | ✅ Working |
 | **fluentbit** | Log collector with Lua OTel transformation | 75 MB | ✅ Working |
+| **otel-collector** | OpenTelemetry Collector (OTLP + filelog receivers) | ~100 MB | ✅ Working |
 | **clickhouse** | Column-oriented database for log storage | 355 MB (293 MB minimal) | ✅ Working |
 | **mongodb** | Document database for HyperDX session storage | ~500 MB | ✅ Working |
 | **ferretdb** | MongoDB-compatible with SQLite backend | ~50 MB | ⚠️ Limited* |
 | **hyperdx** | Observability UI (built from source) | 406 MB | ✅ Working |
+| **redpanda** | Kafka-compatible streaming (for GDP) | ~150 MB | ✅ Working |
+| **redpanda-console** | Redpanda web UI | ~50 MB | ✅ Working |
+| **gdp** | Prometheus metrics via Kafka → ClickHouse | ~10 MB | ✅ Working |
 
 *FerretDB lacks TTL index support (`expireAfterSeconds`) required by HyperDX session management.
 
@@ -119,7 +123,7 @@ kubectl apply -k k8s/
 
 ---
 
-### Option 1: Docker Compose (Fastest)
+### Option 1: Docker Compose (Fastest Local Development)
 
 ```bash
 nix run .#compose-up           # Start (prints helpful instructions)
@@ -129,20 +133,38 @@ nix run .#compose-down         # Stop gracefully
 nix run .#compose-force-stop   # Force stop (if needed)
 ```
 
-**Access:** http://localhost:38080 (HyperDX)
+**Access HyperDX:** http://localhost:38080
 
 **First-time setup:**
 ```bash
-nix run .#compose-setup        # Create HyperDX dashboard
+nix run .#compose-setup        # Create HyperDX connection, source, and dashboard
 ```
 
-**View logs & query data:**
+**View logs:**
 ```bash
-# Loggen container logs
+# Loggen application logs (JSON output)
 docker logs -f otel-loggen
 
-# Query ClickHouse
+# FluentBit processing logs
+docker logs -f otel-fluentbit
+
+# OTel Collector logs
+docker logs -f otel-otel-collector
+
+# ClickHouse server logs
+docker logs -f otel-clickhouse
+```
+
+**Query ClickHouse:**
+```bash
+# Count total logs
 curl 'http://localhost:38123/?query=SELECT+count()+FROM+otel_logs'
+
+# View recent logs
+curl 'http://localhost:38123/?query=SELECT+*+FROM+otel_logs+ORDER+BY+Timestamp+DESC+LIMIT+5+FORMAT+Pretty'
+
+# Count by pipeline
+curl 'http://localhost:38123/?query=SELECT+substring(Body,1,50)+as+pipeline,+count()+FROM+otel_logs+GROUP+BY+pipeline'
 
 # Interactive ClickHouse CLI
 docker exec -it otel-clickhouse clickhouse-client
@@ -160,16 +182,32 @@ nix run .#minikube-down        # Stop gracefully (preserves data)
 nix run .#minikube-delete      # Delete completely
 ```
 
-**Access:** Run `minikube service -n otel-demo hyperdx --url`
+**Access HyperDX:** Run `minikube service -n otel-demo hyperdx --url`
 
-**View logs & query data:**
+**View logs:**
 ```bash
-# Loggen pod logs
+# Loggen application logs (3 methods per tick)
 kubectl -n otel-demo logs -f deployment/loggen
 
-# Query ClickHouse
+# FluentBit processing logs
+kubectl -n otel-demo logs -f ds/fluentbit
+
+# OTel Collector logs
+kubectl -n otel-demo logs -f ds/otel-collector
+
+# ClickHouse server logs
+kubectl -n otel-demo logs -f sts/clickhouse
+```
+
+**Query ClickHouse:**
+```bash
+# Count total logs
 kubectl -n otel-demo exec -it sts/clickhouse -- \
   clickhouse-client --query 'SELECT count() FROM otel_logs'
+
+# Count by pipeline method
+kubectl -n otel-demo exec -it sts/clickhouse -- \
+  clickhouse-client --query "SELECT substring(Body,1,50) as pipeline, count() FROM otel_logs GROUP BY pipeline"
 
 # Interactive ClickHouse CLI
 kubectl -n otel-demo exec -it sts/clickhouse -- clickhouse-client
@@ -177,45 +215,121 @@ kubectl -n otel-demo exec -it sts/clickhouse -- clickhouse-client
 
 ---
 
-### Option 3: MicroVM + K3s (Isolated)
+### Option 3: MicroVM + Minikube (Fully Isolated)
+
+Runs an entire Kubernetes cluster inside a VM for maximum isolation.
 
 ```bash
-sudo nix run .#microvm-k3s     # Start VM with K3s
+# Start MicroVM with embedded Minikube
+nix run .#microvm-minikube
+
+# From another terminal:
 nix run .#microvm-help         # Show usage instructions
 nix run .#microvm-status       # Check VM and pod status
 nix run .#microvm-stop         # Graceful shutdown
-nix run .#stop-vm              # Force kill (if needed)
 nix run .#clean-vm             # Remove VM state files
 ```
 
-**Access:** http://localhost:30808 (HyperDX), SSH: `ssh -p 22022 demo@localhost`
+**Access HyperDX:** http://localhost:30808
 
-**View logs & query data:**
+**SSH into VM:**
 ```bash
-# Loggen pod logs (via SSH)
-ssh -p 22022 demo@localhost 'sudo k3s kubectl -n otel-demo logs -f deployment/loggen'
+ssh -p 22022 root@localhost    # password: root
+```
 
-# Query ClickHouse (via HTTP from host)
+**View logs (inside VM via SSH):**
+```bash
+# SSH into VM
+ssh -p 22022 root@localhost
+
+# Loggen application logs
+kubectl -n otel-demo logs -f deployment/loggen
+
+# All pods status
+kubectl -n otel-demo get pods
+
+# FluentBit logs
+kubectl -n otel-demo logs -f ds/fluentbit
+```
+
+**Query ClickHouse (from host or inside VM):**
+```bash
+# From host (via port forward)
 curl 'http://localhost:28123/?query=SELECT+count()+FROM+otel_logs'
 
-# Interactive ClickHouse CLI (inside VM)
-ssh -p 22022 demo@localhost
-sudo k3s kubectl -n otel-demo exec -it sts/clickhouse -- clickhouse-client
+# Inside VM via SSH
+ssh -p 22022 root@localhost \
+  'kubectl -n otel-demo exec -it sts/clickhouse -- clickhouse-client --query "SELECT count() FROM otel_logs"'
+```
+
+**Other MicroVM Variants:**
+```bash
+nix run .#microvm-k3s          # K3s variant (lightweight, recommended for testing)
+nix run .#microvm-docker       # Docker Compose variant (lowest resources)
 ```
 
 ---
 
-### Run the Test Suite
+## Lifecycle Testing
+
+Comprehensive automated tests verify the entire pipeline across all deployment methods.
+
+### Run All Tests
 
 ```bash
-# Run all deployment tests
-nix run .#test-all-deployments
-
-# Or individually
-nix run .#test-docker-compose  # Test Docker Compose
-nix run .#test-minikube        # Test Minikube (all 3 logging pipelines)
-nix run .#test-microvm         # Test MicroVM
+nix run .#lifecycle-test-all      # Run all 3 deployment tests sequentially
 ```
+
+**Sample Output:**
+```
+═══════════════════════════════════════════════════════════════
+ All Deployment Tests Summary
+═══════════════════════════════════════════════════════════════
+
+  Test                 Result     Time
+  ────                 ──────     ────
+  Docker Compose       pass       1m44s
+  Minikube             pass       4m55s
+  MicroVM              pass       5m20s
+
+  Total time: 12m0s
+  Passed: 3
+  Failed: 0
+
+All tests passed!
+```
+
+### Individual Tests
+
+```bash
+nix run .#lifecycle-test-docker-compose   # Docker Compose only (~2 min)
+nix run .#lifecycle-test-minikube         # Minikube only (~5 min)
+nix run .#lifecycle-test-microvm          # MicroVM+Minikube only (~5 min)
+```
+
+### What's Tested
+
+Each lifecycle test verifies:
+
+| Phase | Check | Description |
+|-------|-------|-------------|
+| 0 | Build | Nix derivations build successfully |
+| 1 | Start | Deployment starts without errors |
+| 2 | Ready | Services become ready (SSH/Minikube for VM) |
+| 3 | Pods | All pods running (ClickHouse, HyperDX, GDP, etc.) |
+| 4 | Application | Data pipelines working |
+| 5 | Shutdown | Clean shutdown |
+| 6 | Exit | Process exits cleanly |
+
+**Phase 4 Application Checks:**
+- ClickHouse responds to queries
+- Log count > 0 in `otel_logs` table
+- FluentBit pipeline logs present (Method 1)
+- OTLP pipeline logs present (Method 2)
+- Filelog pipeline logs present (Method 3)
+- GDP table exists with metrics
+- Kafka consumer healthy (Redpanda)
+- HyperDX health endpoint responds
 
 ---
 
@@ -232,7 +346,7 @@ nix build .#all-images
 nix run .#load-images
 ```
 
-### Run Tests
+### Run Go Tests
 
 ```bash
 # Run Go tests
@@ -382,8 +496,11 @@ All ports are centralized in `nix/ports.nix`:
 | MongoDB | 27017 |
 | HyperDX API | 8000 |
 | HyperDX App | 8080 |
+| Redpanda Kafka | 9092 |
+| Redpanda Console | 8080 |
+| GDP Prometheus | 8888 |
 
-**Host Forwards (MicroVM → Host):**
+**MicroVM Host Forwards (2XXXX prefix):**
 | Service | Port |
 |---------|------|
 | SSH | 22022 |
@@ -393,8 +510,15 @@ All ports are centralized in `nix/ports.nix`:
 | MongoDB | 27017 |
 | HyperDX API | 28000 |
 | HyperDX App | 28080 |
+| Serial Console | 24500 |
 
-**Docker Compose External Ports:**
+**Kubernetes NodePorts (for Minikube):**
+| Service | Port |
+|---------|------|
+| HyperDX App | 30808 |
+| HyperDX API | 30800 |
+
+**Docker Compose External Ports (3XXXX prefix):**
 | Service | Port |
 |---------|------|
 | HyperDX App | 38080 |
@@ -402,6 +526,9 @@ All ports are centralized in `nix/ports.nix`:
 | ClickHouse HTTP | 38123 |
 | ClickHouse Native | 39000 |
 | MongoDB | 37017 |
+| Redpanda Kafka | 39092 |
+| Redpanda Console | 38085 |
+| GDP Prometheus | 38888 |
 
 ## Project Structure
 
@@ -412,48 +539,60 @@ clickhouse-otel-example/
 ├── internal/
 │   ├── config/                 # CLI flags + env var configuration
 │   ├── health/                 # HTTP health endpoints
-│   └── loop/                   # Log generation logic
+│   ├── loop/                   # Log generation logic (3 methods)
+│   └── otel/                   # OTel SDK logger provider
 ├── k8s/
 │   ├── namespace.yaml          # otel-demo namespace
+│   ├── kustomization.yaml      # Kustomize configuration
 │   ├── loggen/                 # Loggen deployment
 │   ├── fluentbit/              # FluentBit DaemonSet + ConfigMap
 │   ├── otel-collector/         # OTel Collector DaemonSet (OTLP + filelog)
 │   ├── clickhouse/             # ClickHouse StatefulSet + init SQL
-│   ├── mongodb/                # MongoDB StatefulSet (default backend)
-│   ├── ferretdb/               # FerretDB StatefulSet (alternative, lightweight)
-│   └── hyperdx/                # HyperDX deployment + init user job
+│   ├── mongodb/                # MongoDB StatefulSet
+│   ├── ferretdb/               # FerretDB StatefulSet (alternative)
+│   ├── hyperdx/                # HyperDX deployment + init user job
+│   ├── redpanda/               # Redpanda StatefulSet (Kafka-compatible)
+│   ├── redpanda-console/       # Redpanda Console deployment
+│   └── gdp/                    # GDP collector deployment + ConfigMap
 ├── nix/
 │   ├── lib/                    # Shared utilities
-│   │   ├── default.nix         # Library entry point
-│   │   ├── shell.nix           # Shell script utilities
 │   │   ├── containers.nix      # Container image factory
-│   │   └── apps.nix            # Flake app helpers
-│   ├── verify/                 # Pipeline verification (modular)
+│   │   ├── apps.nix            # Flake app helpers
+│   │   ├── microvm.nix         # MicroVM helpers
+│   │   └── minikube.nix        # Minikube helpers
+│   ├── lifecycle/              # Lifecycle testing framework
 │   │   ├── default.nix         # Entry point
-│   │   ├── positive.nix        # verify-* scripts
-│   │   ├── init.nix            # init-clickhouse
-│   │   ├── break-fix.nix       # break-*/fix-* pairs
-│   │   ├── latency.nix         # measure-latency scripts
-│   │   ├── integration.nix     # Deployment integration tests
-│   │   └── test-harness.nix    # test-verify-scripts
+│   │   ├── lib.nix             # Shell helpers (timing, polling, colors)
+│   │   ├── constants.nix       # Timeouts, queries, variant configs
+│   │   ├── transports.nix      # HTTP/kubectl/SSH transport abstraction
+│   │   ├── checks/             # Parametric check factory
+│   │   │   └── factory.nix     # Check code generators
+│   │   └── variants/           # Per-deployment test scripts
+│   │       ├── docker-compose.nix
+│   │       ├── minikube.nix
+│   │       └── microvm.nix
 │   ├── microvm/                # MicroVM configurations
 │   │   ├── default.nix         # Module entry point (variant selection)
 │   │   ├── base.nix            # Shared NixOS config
 │   │   ├── images.nix          # Container image loading
 │   │   └── variants/
 │   │       ├── docker.nix      # Docker Compose variant
-│   │       ├── k3s.nix         # K3s variant (recommended)
-│   │       └── minikube.nix    # Minikube variant
+│   │       ├── k3s.nix         # K3s variant
+│   │       └── minikube.nix    # Minikube variant (lifecycle tested)
+│   ├── k8s/                    # K8s manifest generation
+│   │   └── default.nix         # Hybrid manifests (static + generated)
 │   ├── go-app.nix              # Go application derivation
 │   ├── fluentbit.nix           # FluentBit with custom config
 │   ├── hyperdx.nix             # HyperDX built from source
-│   ├── containers.nix          # OCI image definitions (uses lib/containers.nix)
+│   ├── otel-collector.nix      # OTel Collector configuration
+│   ├── redpanda.nix            # Redpanda configuration
+│   ├── containers.nix          # OCI image definitions
 │   ├── docker-compose.nix      # Docker Compose generator
 │   ├── ports.nix               # Centralized port configuration
-│   └── devshell.nix            # Development environment
+│   └── constants.nix           # Shared constants
 ├── flake.nix                   # Nix flake
 ├── DESIGN.md                   # Detailed design document
-└── IMPLEMENTATION_LOG.md       # Implementation progress log
+└── README.md                   # This file
 ```
 
 ### Nix Architecture
@@ -540,19 +679,19 @@ The project includes MicroVM configurations for isolated testing with three vari
 
 | Variant | RAM | vCPUs | Disk | Use Case |
 |---------|-----|-------|------|----------|
-| **k3s** (recommended) | 6 GB | 3 | 15 GB | Lightweight Kubernetes, fastest startup |
+| **minikube** | 8 GB | 4 | 40 GB | Full Minikube, lifecycle tested |
+| **k3s** | 6 GB | 3 | 15 GB | Lightweight Kubernetes, fastest startup |
 | **docker** | 4 GB | 2 | 15 GB | Direct Docker Compose, lowest resources |
-| **minikube** | 8 GB | 4 | 20 GB | Full Minikube, most compatible |
 
 ### Quick Start
 
 ```bash
-# Build and run the K3s variant (recommended)
-nix build .#nixosConfigurations.microvm-k3s.config.microvm.declaredRunner
-sudo ./result/bin/microvm-run
+# Run Minikube variant (used by lifecycle tests)
+nix run .#microvm-minikube
 
-# Or run directly (builds if needed)
-sudo nix run .#microvm-k3s
+# Or other variants:
+nix run .#microvm-k3s          # K3s lightweight
+nix run .#microvm-docker       # Docker Compose
 ```
 
 ### Access Points
@@ -561,43 +700,48 @@ Once the VM is running:
 
 | Service | URL/Command |
 |---------|-------------|
-| **SSH** | `ssh -p 22022 demo@localhost` (password: `demo`) |
+| **SSH** | `ssh -p 22022 root@localhost` (password: `root`) |
 | **HyperDX UI** | http://localhost:30808 |
 | **HyperDX API** | http://localhost:30800 |
 | **ClickHouse HTTP** | http://localhost:28123 |
 | **ClickHouse Native** | localhost:29000 |
+| **Serial Console** | `nc localhost 24500` (for boot debugging) |
 
 ### Verify VM is Working
 
 ```bash
 # SSH into the VM
-ssh -p 22022 demo@localhost
+ssh -p 22022 root@localhost
 
-# Check pod status (K3s variant)
-sudo k3s kubectl -n otel-demo get pods
+# Check pod status (Minikube variant)
+kubectl -n otel-demo get pods
 
 # Check logs are flowing
-sudo k3s kubectl -n otel-demo exec clickhouse-0 -- \
-  clickhouse-client --query 'SELECT count() FROM default.otel_logs'
+kubectl -n otel-demo exec -it clickhouse-0 -- \
+  clickhouse-client --query 'SELECT count() FROM otel_logs'
+
+# View loggen output
+kubectl -n otel-demo logs -f deployment/loggen
 ```
 
 ### Variant Details
+
+**Minikube Variant** (`microvm-minikube`):
+- Full Minikube with Docker driver inside VM
+- Most compatible with standard Kubernetes tooling
+- Used by `lifecycle-test-microvm` for CI/CD verification
+- All 10 pods: loggen, fluentbit, otel-collector, clickhouse, hyperdx, mongodb, redpanda, redpanda-console, gdp, hyperdx-init-user
 
 **K3s Variant** (`microvm-k3s`):
 - Uses K3s lightweight Kubernetes
 - Images loaded via `k3s ctr images import`
 - Fastest boot time (~60s to fully operational)
-- Recommended for most testing scenarios
+- Good for quick testing
 
 **Docker Variant** (`microvm-docker`):
 - Direct Docker Compose execution
 - Lowest resource requirements
 - Best for resource-constrained environments
-
-**Minikube Variant** (`microvm-minikube`):
-- Full Minikube with Docker driver
-- Most compatible with standard Kubernetes tooling
-- Highest resource requirements
 
 ### MicroVM Architecture
 
@@ -833,79 +977,79 @@ This will:
 
 ## Integration Testing
 
-### Automated Deployment Tests
+### Lifecycle Tests
 
-The project includes comprehensive integration tests for all three deployment methods. All tests are passing:
+The project includes comprehensive lifecycle tests that verify the entire pipeline across all deployment methods:
 
 ```bash
 # Run all deployment tests
-nix run .#test-all-deployments
+nix run .#lifecycle-test-all
 ```
 
 **Test Results:**
 ```
-==============================================
-All Deployment Tests Summary
-==============================================
+═══════════════════════════════════════════════════════════════
+ All Deployment Tests Summary
+═══════════════════════════════════════════════════════════════
 
-  Passed: 3/3
-  Failed: 0/3
+  Test                 Result     Time
+  ────                 ──────     ────
+  Docker Compose       pass       1m44s
+  Minikube             pass       4m55s
+  MicroVM              pass       5m20s
 
-[PASS] All tests passed!
+  Total time: 12m0s
+  Passed: 3
+  Failed: 0
+
+All tests passed!
 ```
 
 #### Individual Test Commands
 
 | Command | Description | What It Tests |
 |---------|-------------|---------------|
-| `nix run .#test-docker-compose` | Docker Compose stack | Container startup, log pipeline, FluentBit → ClickHouse |
-| `nix run .#test-minikube` | Minikube Kubernetes | Full K8s deployment, all 3 logging pipelines, latency comparison |
-| `nix run .#test-microvm` | MicroVM with Minikube | VM boot, SSH access, Minikube inside VM, pod deployment |
+| `nix run .#lifecycle-test-docker-compose` | Docker Compose stack | Container startup, all 3 logging pipelines, GDP metrics |
+| `nix run .#lifecycle-test-minikube` | Host Minikube | Full K8s deployment, all pods, all 3 logging pipelines |
+| `nix run .#lifecycle-test-microvm` | MicroVM+Minikube | VM boot, SSH, embedded Minikube, full pipeline verification |
 
-#### Test Coverage
+#### Test Coverage (MicroVM Example - 20 checks)
 
-**Docker Compose Test (8 checks):**
-- Stack startup and readiness
-- All containers running (clickhouse, fluentbit, loggen, hyperdx, mongodb)
-- Log pipeline verification (logs flowing to ClickHouse)
-- FluentBit pipeline log count
-
-**Minikube Test (9 checks):**
-- Minikube cluster startup
-- Image loading into Minikube
-- K8s manifest deployment
-- Pod readiness (ClickHouse, Loggen, HyperDX)
-- All three logging pipelines:
-  - FluentBit+Lua pipeline
-  - OTLP direct pipeline
-  - Collector filelog pipeline
-- Latency comparison by pipeline
-
-**MicroVM Test (4 checks):**
-- VM boot and SSH accessibility
-- Minikube running inside VM
-- Pod deployment (4+ pods running)
-- Log flow to ClickHouse
+| Phase | Check | Description |
+|-------|-------|-------------|
+| 0 | Build | Nix derivation builds |
+| 1 | Start | VM process starts |
+| 2a | Serial | Serial console accessible (ttyS0 on port 24500) |
+| 2b | Virtio | Skipped (microvm machine has no PCI bus) |
+| 2c | SSH | SSH accessible with authentication |
+| 2d | Minikube | Minikube running inside VM |
+| 3 | Pods | 6+ pods running in namespace |
+| 3 | clickhouse | ClickHouse responds to `SELECT 1` |
+| 3 | hyperdx | HyperDX `/health` endpoint responds |
+| 3 | gdp | GDP pod ready |
+| 4 | ClickHouse | ClickHouse query works |
+| 4 | Log count | Logs exist in `otel_logs` table |
+| 4 | FluentBit logs | Method 1 logs present ("FluentBit+Lua") |
+| 4 | OTLP logs | Method 2 logs present ("OTLP direct") |
+| 4 | Filelog logs | Method 3 logs present ("filelog receiver") |
+| 4 | GDP table | `gdp.ProtobufSingle` table exists |
+| 4 | GDP metrics | GDP metrics count > 0 |
+| 4 | Kafka | Kafka consumer healthy (no exceptions) |
+| 4 | HyperDX | HyperDX health check passes |
+| 5 | Shutdown | VM stops gracefully |
+| 6 | Exit | VM process exits |
 
 #### Three-Method Logging Pipeline
 
-The minikube test verifies all three logging methods with latency comparison:
+The loggen application outputs each log via three different methods for latency comparison:
 
-```
-┌─pipeline──┬─log_count─┬─avg_latency_ms─┬─min_latency_ms─┬─max_latency_ms─┐
-│ filelog   │        10 │            940 │            929 │            953 │
-│ otlp      │         9 │           1959 │           1949 │           1971 │
-│ fluentbit │        18 │           6266 │            415 │          29483 │
-└───────────┴───────────┴────────────────┴────────────────┴────────────────┘
-```
+| Method | Path | Marker in Log Body |
+|--------|------|-------------------|
+| FluentBit+Lua | stdout → FluentBit → ClickHouse | "tick via FluentBit+Lua pipeline" |
+| OTLP Direct | OTel SDK → Collector → ClickHouse | "tick via OTLP direct to Collector" |
+| Filelog | stdout → OTel Collector filelog → ClickHouse | "tick via Collector filelog receiver" |
 
-| Method | Path | Avg Latency |
-|--------|------|-------------|
-| Filelog | stdout → OTel Collector filelog → ClickHouse | ~1s |
-| OTLP Direct | OTel SDK → Collector → ClickHouse | ~2s |
-| FluentBit+Lua | stdout → FluentBit → ClickHouse | ~6s |
-
-See [`docs/LOGGING_PIPELINE.md`](docs/LOGGING_PIPELINE.md) for detailed documentation of all three logging pipelines.
+See [`docs/LOGGING_PIPELINE.md`](docs/LOGGING_PIPELINE.md) for detailed documentation.
 
 ---
 

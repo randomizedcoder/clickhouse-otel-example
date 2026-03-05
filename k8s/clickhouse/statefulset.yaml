@@ -18,6 +18,25 @@ spec:
       labels:
         app: clickhouse
     spec:
+      initContainers:
+        - name: wait-for-redpanda
+          image: clickhouse:latest
+          imagePullPolicy: Never
+          command:
+            - /bin/bash
+            - -c
+            - |
+              echo "Waiting for Redpanda to be ready (timeout 120s)..."
+              for i in {1..24}; do
+                if timeout 2 bash -c "echo > /dev/tcp/redpanda/9092" 2>/dev/null; then
+                  echo "Redpanda is ready"
+                  exit 0
+                fi
+                echo "Redpanda not ready, waiting... ($i/24)"
+                sleep 5
+              done
+              echo "Warning: Redpanda not available, proceeding anyway"
+              exit 0
       containers:
         - name: clickhouse
           image: clickhouse:latest
@@ -44,6 +63,12 @@ spec:
               if [ -f /docker-entrypoint-initdb.d/init.sql ]; then
                 echo "Running init SQL..."
                 clickhouse-client --multiquery < /docker-entrypoint-initdb.d/init.sql || echo "Init SQL completed (may have already existed)"
+              fi
+
+              # Run GDP init SQL (creates gdp database and Kafka tables)
+              if [ -f /docker-entrypoint-initdb.d/init-gdp.sql ]; then
+                echo "Running GDP init SQL..."
+                clickhouse-client --multiquery < /docker-entrypoint-initdb.d/init-gdp.sql || echo "GDP init SQL completed (may have already existed)"
               fi
 
               # Wait for ClickHouse process
@@ -85,6 +110,8 @@ spec:
               subPath: users.xml
             - name: init
               mountPath: /docker-entrypoint-initdb.d
+            - name: format-schemas
+              mountPath: /var/lib/clickhouse/format_schemas
           resources:
             requests:
               memory: "1Gi"
@@ -99,6 +126,12 @@ spec:
         - name: init
           configMap:
             name: clickhouse-init
+        - name: format-schemas
+          configMap:
+            name: clickhouse-init
+            items:
+              - key: prometheus_protolist.proto
+                path: prometheus_protolist.proto
   volumeClaimTemplates:
     - metadata:
         name: data
