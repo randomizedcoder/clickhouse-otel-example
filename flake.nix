@@ -47,9 +47,15 @@
             inherit (pkgs) yarn-berry inter ibm-plex roboto roboto-mono;
           };
 
+          # OpenTelemetry Collector Contrib (built from source)
+          otelCollector = pkgs.callPackage ./nix/otel-collector.nix { };
+
+          # Redpanda (Kafka-compatible) - pulled images
+          redpanda = pkgs.callPackage ./nix/redpanda.nix { };
+
           # Container images
           containers = pkgs.callPackage ./nix/containers.nix {
-            inherit goApp fluentbit clickhouse hyperdx;
+            inherit goApp fluentbit clickhouse hyperdx otelCollector redpanda;
           };
 
           # Container images with minimal ClickHouse
@@ -62,7 +68,7 @@
           compose = import ./nix/docker-compose.nix {
             lib = pkgs.lib;
             inherit pkgs;
-            inherit (pkgs) writeText;
+            inherit (pkgs) writeText fetchFromGitHub buildGoModule runCommand;
           };
 
           # Minikube lifecycle management
@@ -83,6 +89,15 @@
             program = "${verify.${name}}/bin/${name}";
           });
 
+          # Lifecycle testing framework (polling-based, phase-driven)
+          lifecycle = import ./nix/lifecycle {
+            inherit pkgs;
+            lib = pkgs.lib;
+          };
+
+          # Lifecycle apps
+          lifecycleApps = lifecycle.apps;
+
         in
         {
           # Packages
@@ -91,6 +106,8 @@
             fluentbit = fluentbit;
             clickhouse-minimal = clickhouseMinimal;
             hyperdx = hyperdx;
+            otel-collector = otelCollector;
+            redpanda = redpanda;
 
             # OCI container images
             loggen-image = containers.loggenImage;
@@ -100,7 +117,14 @@
             mongodb-image = containers.mongodbImage;
             ferretdb-image = containers.ferretdbImage;
             hyperdx-image = containers.hyperdxImage;
+            gdp-image = containers.gdpImage;
+            otel-collector-image = containers.otelCollectorImage;
+            redpanda-image = containers.redpandaImage;
+            redpanda-console-image = containers.redpandaConsoleImage;
             all-images = containers.allImages;
+
+            # Docker Compose file for validation
+            docker-compose-file = compose.composeFile;
 
             default = goApp;
           };
@@ -416,7 +440,7 @@
                 '';
               }}/bin/microvm-stop";
             };
-          } // verifyApps // (if system == "x86_64-linux" then
+          } // verifyApps // lifecycleApps // (if system == "x86_64-linux" then
           # MicroVM runners (x86_64-linux only)
             pkgs.lib.genAttrs (microvmNames ++ [ "microvm" ])
               (name: {

@@ -84,7 +84,13 @@
         { name = "fluentbit"; path = packages.fluentbit-image; }
         { name = "clickhouse"; path = packages.clickhouse-image; }
         { name = "mongodb"; path = packages.mongodb-image; }
+        { name = "ferretdb"; path = packages.ferretdb-image; }
         { name = "hyperdx"; path = packages.hyperdx-image; }
+        { name = "gdp"; path = packages.gdp-image; }
+        # Pulled images (external projects)
+        { name = "otel-collector"; path = packages.otel-collector-image; }
+        { name = "redpanda"; path = packages.redpanda-image; }
+        { name = "redpanda-console"; path = packages.redpanda-console-image; }
       ];
     in
     lib.concatMapStringsSep "\n"

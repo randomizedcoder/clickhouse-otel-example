@@ -11,6 +11,7 @@ let
   tlsPackages = [ pkgs.cacert ];
   tzPackages = [ pkgs.tzdata ];
   shellPackages = [ pkgs.bashInteractive pkgs.coreutils ];
+  userPackages = [ pkgs.fakeNss ]; # Provides /etc/passwd and /etc/group
 
   # Standard environment variables for TLS and timezone
   standardEnv = [
@@ -51,6 +52,7 @@ let
     , includeTls ? true
     , includeTz ? true
     , includeShell ? false
+    , includeUsers ? false # Include /etc/passwd and /etc/group for user resolution
     ,
     }:
     pkgs.dockerTools.buildImage {
@@ -61,7 +63,8 @@ let
         paths = packages
           ++ lib.optionals includeTls tlsPackages
           ++ lib.optionals includeTz tzPackages
-          ++ lib.optionals includeShell shellPackages;
+          ++ lib.optionals includeShell shellPackages
+          ++ lib.optionals includeUsers userPackages;
         inherit pathsToLink;
       };
 

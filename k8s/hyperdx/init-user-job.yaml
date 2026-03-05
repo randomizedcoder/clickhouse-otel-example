@@ -12,9 +12,10 @@ spec:
       restartPolicy: OnFailure
       containers:
         - name: init-user
-          image: curlimages/curl:latest
+          image: clickhouse:latest
+          imagePullPolicy: Never
           command:
-            - /bin/sh
+            - /bin/bash
             - -c
             - |
               echo "Waiting for HyperDX API to be ready..."

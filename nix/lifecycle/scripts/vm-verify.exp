@@ -1,0 +1,112 @@
+#!/usr/bin/expect -f
+#
+# vm-verify.exp - Service verification via MicroVM console
+#
+# Usage: vm-verify.exp <port> <timeout> [namespace]
+#
+# Verifies:
+# - Minikube is running
+# - Pods are ready
+# - ClickHouse is responding
+# - Logs are flowing
+#
+# Environment variables:
+#   VM_USERNAME   - Login username (default: root)
+#   VM_PASSWORD   - Login password (default: demo)
+#   EXPECT_DEBUG  - Enable expect debug mode
+#
+
+# Load shared library
+source [file dirname [info script]]/vm-lib.exp
+
+# Parse arguments
+if {$argc < 2} {
+    puts "Usage: vm-verify.exp <port> <timeout> \[namespace\]"
+    exit 1
+}
+
+set port [lindex $argv 0]
+set timeout [lindex $argv 1]
+set namespace "otel-demo"
+if {$argc >= 3} {
+    set namespace [lindex $argv 2]
+}
+
+# Initialize
+vmlib::init
+
+# Counters
+set passed 0
+set failed 0
+
+proc result_pass {msg} {
+    global passed
+    incr passed
+    puts "  \033\[32m✓ PASS\033\[0m: $msg"
+}
+
+proc result_fail {msg} {
+    global failed
+    incr failed
+    puts "  \033\[31m✗ FAIL\033\[0m: $msg"
+}
+
+puts ""
+puts "\033\[1m═══ MicroVM Verification ═══\033\[0m"
+puts ""
+
+# Connect and login
+puts "Connecting to console on port $port..."
+vmlib::connect $port
+vmlib::login
+
+# Check Minikube
+puts "Checking Minikube..."
+set status [vmlib::check_minikube]
+if {$status eq "running"} {
+    result_pass "Minikube running"
+} else {
+    result_fail "Minikube not running (status: $status)"
+}
+
+# Check pod count
+puts "Checking pods in namespace $namespace..."
+set pod_count [vmlib::check_pod_count $namespace]
+if {$pod_count >= 4} {
+    result_pass "Pods running: $pod_count"
+} elseif {$pod_count >= 0} {
+    result_fail "Not enough pods: $pod_count"
+} else {
+    result_fail "Failed to get pod count"
+}
+
+# Check ClickHouse
+puts "Checking ClickHouse..."
+set ch_status [vmlib::check_clickhouse $namespace]
+if {$ch_status eq "ok"} {
+    result_pass "ClickHouse responding"
+} else {
+    result_fail "ClickHouse not responding (status: $ch_status)"
+}
+
+# Check log count
+puts "Checking logs in ClickHouse..."
+set log_count [vmlib::get_log_count $namespace]
+if {$log_count > 0} {
+    result_pass "Logs in ClickHouse: $log_count"
+} else {
+    result_fail "No logs in ClickHouse"
+}
+
+# Summary
+puts ""
+puts "\033\[1m═══ Summary ═══\033\[0m"
+puts "  Passed: $passed"
+puts "  Failed: $failed"
+puts ""
+
+if {$failed > 0} {
+    exit 1
+} else {
+    exit 0
+}

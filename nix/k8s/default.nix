@@ -1,11 +1,20 @@
 # K8s Manifest Generator
 #
-# Generates Kubernetes manifests with configuration from ports.nix
+# Generates Kubernetes manifests with configuration from ports.nix and constants.nix.
 # This ensures URLs, ports, and other settings are consistent across the stack.
+#
+# This module provides two modes:
+# 1. Hybrid mode (default): Uses static manifests with generated HyperDX deployment
+# 2. Generated mode: Uses fully generated manifests from services definitions
+#
 { lib, pkgs, k8sStaticPath }:
 
 let
   ports = import ../ports.nix;
+  constants = import ../constants.nix { inherit pkgs; };
+
+  # Import generators for full generation mode
+  generators = import ../generators/default.nix { inherit pkgs lib; };
 
   # Generate HyperDX deployment with correct URLs
   hyperdxDeployment = pkgs.writeText "hyperdx-deployment.yaml" ''
@@ -13,7 +22,7 @@ let
     kind: Deployment
     metadata:
       name: hyperdx
-      namespace: otel-demo
+      namespace: ${constants.minikube.namespace}
       labels:
         app: hyperdx
         app.kubernetes.io/name: hyperdx
@@ -30,15 +39,18 @@ let
         spec:
           containers:
             - name: hyperdx
+              # TODO: Switch to Nix-built hyperdx:latest once proto file issue is fixed
+              # The Nix build needs to copy proto files to build/src/opamp/proto/
+              # For now, use upstream Docker Hub image for reliability
               image: hyperdx/hyperdx:latest
               imagePullPolicy: IfNotPresent
               env:
                 # MongoDB backend for session storage
                 - name: MONGO_URI
-                  value: "mongodb://mongodb.otel-demo.svc.cluster.local:27017/hyperdx"
+                  value: "mongodb://mongodb.${constants.minikube.namespace}.svc.cluster.local:${toString ports.services.mongodb}/hyperdx"
                 # ClickHouse connection
                 - name: CLICKHOUSE_HOST
-                  value: "clickhouse.otel-demo.svc.cluster.local"
+                  value: "clickhouse.${constants.minikube.namespace}.svc.cluster.local"
                 - name: CLICKHOUSE_PORT
                   value: "${toString ports.services.clickhouseHttp}"
                 - name: CLICKHOUSE_USER
@@ -56,7 +68,7 @@ let
                   value: "http://${ports.externalHost}:${toString ports.nodePorts.hyperdxApi}"
                 # Auto-provision ClickHouse connection
                 - name: DEFAULT_CONNECTIONS
-                  value: '[{"name":"Default","host":"http://clickhouse.otel-demo.svc.cluster.local:${toString ports.services.clickhouseHttp}","username":"default","password":""}]'
+                  value: '[{"name":"Default","host":"http://clickhouse.${constants.minikube.namespace}.svc.cluster.local:${toString ports.services.clickhouseHttp}","username":"default","password":""}]'
                 # Auto-provision OTel logs source
                 - name: DEFAULT_SOURCES
                   value: '[{"name":"OTel Logs","kind":"log","connection":"Default","from":{"databaseName":"default","tableName":"otel_logs"},"timestampValueExpression":"Timestamp","bodyExpression":"Body","severityTextExpression":"SeverityText","serviceNameExpression":"ServiceName","traceIdExpression":"TraceId","spanIdExpression":"SpanId"}]'
@@ -84,10 +96,10 @@ let
                 httpGet:
                   path: /health
                   port: api
-                initialDelaySeconds: 30
+                initialDelaySeconds: 60
                 periodSeconds: 10
                 timeoutSeconds: 5
-                failureThreshold: 3
+                failureThreshold: 6
               resources:
                 requests:
                   memory: "512Mi"
@@ -100,7 +112,7 @@ let
     kind: Service
     metadata:
       name: hyperdx
-      namespace: otel-demo
+      namespace: ${constants.minikube.namespace}
       labels:
         app: hyperdx
     spec:
@@ -120,14 +132,35 @@ let
         app: hyperdx
   '';
 
+  # Hybrid mode: static manifests + generated HyperDX
+  hybridManifests = pkgs.runCommand "k8s-manifests" { } ''
+    mkdir -p $out/hyperdx
+
+    # Copy static manifests (excluding hyperdx deployment which we generate)
+    cp -r ${k8sStaticPath}/* $out/
+
+    # Replace hyperdx deployment with generated one
+    rm -f $out/hyperdx/deployment.yaml
+    cp ${hyperdxDeployment} $out/hyperdx/deployment.yaml
+  '';
+
+  # Fully generated mode: all manifests from service definitions
+  generatedManifests = generators.k8s.k8sManifests;
+
 in
-pkgs.runCommand "k8s-manifests" { } ''
-  mkdir -p $out/hyperdx
+{
+  # Default: hybrid mode (static + generated HyperDX)
+  default = hybridManifests;
 
-  # Copy static manifests (excluding hyperdx deployment which we generate)
-  cp -r ${k8sStaticPath}/* $out/
+  # Alternative: fully generated mode
+  generated = generatedManifests;
 
-  # Replace hyperdx deployment with generated one
-  rm -f $out/hyperdx/deployment.yaml
-  cp ${hyperdxDeployment} $out/hyperdx/deployment.yaml
-''
+  # Export individual components
+  inherit hyperdxDeployment;
+
+  # Export generators for advanced use
+  inherit generators;
+
+  # Re-export ports and constants
+  inherit ports constants;
+}

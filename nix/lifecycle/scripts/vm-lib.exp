@@ -1,0 +1,263 @@
+#!/usr/bin/expect -f
+#
+# vm-lib.exp - Shared library for MicroVM console scripts
+#
+# Source this file from other scripts:
+#   source [file dirname [info script]]/vm-lib.exp
+#
+# Environment variables:
+#   VM_USERNAME   - Login username (default: root)
+#   VM_PASSWORD   - Login password (default: demo)
+#   EXPECT_DEBUG  - Enable expect debug mode (exp_internal 1)
+#
+
+namespace eval vmlib {
+    # Configuration
+    variable prompt_pattern "root@.*:.*#"
+    variable wake_delay 0.5
+    variable debug 0
+
+    # Initialize library - call this at script start
+    proc init {} {
+        variable debug
+        if {[info exists ::env(EXPECT_DEBUG)] && $::env(EXPECT_DEBUG) ne ""} {
+            set debug 1
+            exp_internal 1
+        }
+        # Disable echo for cleaner output
+        log_user 0
+    }
+
+    # Safe credential retrieval from environment
+    proc get_credentials {} {
+        set username "root"
+        set password "demo"
+        if {[info exists ::env(VM_USERNAME)] && $::env(VM_USERNAME) ne ""} {
+            set username $::env(VM_USERNAME)
+        }
+        if {[info exists ::env(VM_PASSWORD)] && $::env(VM_PASSWORD) ne ""} {
+            set password $::env(VM_PASSWORD)
+        }
+        return [list $username $password]
+    }
+
+    # Connect to console via socat
+    proc connect {port} {
+        variable debug
+        if {$debug} {
+            puts "Connecting to port $port..."
+        }
+        spawn socat -,rawer tcp:127.0.0.1:$port
+        expect {
+            "Connection refused" {
+                puts "ERROR: Connection refused on port $port"
+                exit 1
+            }
+            timeout {
+                puts "ERROR: Connection timeout on port $port"
+                exit 1
+            }
+            -re "." {
+                # Got some output, continue
+            }
+        }
+    }
+
+    # Wake console and handle login sequence
+    proc login {} {
+        variable prompt_pattern
+        variable wake_delay
+        variable debug
+
+        lassign [get_credentials] username password
+
+        # Send newline to wake console
+        send "\r"
+        sleep $wake_delay
+
+        expect {
+            "login:" {
+                if {$debug} { puts "Got login prompt" }
+                send "$username\r"
+                expect "Password:"
+                send "$password\r"
+                expect {
+                    -re $prompt_pattern {
+                        if {$debug} { puts "Logged in successfully" }
+                    }
+                    "Login incorrect" {
+                        puts "ERROR: Login failed"
+                        exit 1
+                    }
+                    timeout {
+                        puts "ERROR: Login timeout"
+                        exit 1
+                    }
+                }
+            }
+            -re $prompt_pattern {
+                if {$debug} { puts "Already logged in" }
+            }
+            "Welcome to NixOS" {
+                if {$debug} { puts "System just booted, waiting for login" }
+                expect "login:"
+                send "$username\r"
+                expect "Password:"
+                send "$password\r"
+                expect -re $prompt_pattern
+            }
+            timeout {
+                puts "ERROR: No prompt received within timeout"
+                exit 1
+            }
+        }
+    }
+
+    # Run a command and wait for prompt
+    # Returns 1 on success, 0 on timeout
+    proc run_cmd {cmd} {
+        variable prompt_pattern
+        variable debug
+        if {$debug} { puts "Running: $cmd" }
+        send "$cmd\r"
+        expect {
+            -re $prompt_pattern {
+                return 1
+            }
+            timeout {
+                puts "ERROR: Command timeout: $cmd"
+                return 0
+            }
+        }
+    }
+
+    # Run command and capture output
+    proc run_cmd_output {cmd} {
+        variable prompt_pattern
+        variable debug
+        if {$debug} { puts "Running: $cmd" }
+        send "$cmd\r"
+        expect {
+            -re "(.*)\r\n.*$prompt_pattern" {
+                return $expect_out(1,string)
+            }
+            timeout {
+                return ""
+            }
+        }
+    }
+
+    # Check systemd service status
+    # Returns: active, inactive, failed, activating, or timeout
+    proc check_service {service} {
+        variable prompt_pattern
+        send "systemctl is-active $service\r"
+        expect {
+            "active\r" {
+                expect -re $prompt_pattern
+                return "active"
+            }
+            "inactive\r" {
+                expect -re $prompt_pattern
+                return "inactive"
+            }
+            "failed\r" {
+                expect -re $prompt_pattern
+                return "failed"
+            }
+            "activating\r" {
+                expect -re $prompt_pattern
+                return "activating"
+            }
+            timeout {
+                return "timeout"
+            }
+        }
+    }
+
+    # Check minikube status
+    # Returns: running, stopped, or timeout
+    proc check_minikube {} {
+        variable prompt_pattern
+        send "minikube status 2>/dev/null | grep -c Running || echo 0\r"
+        expect {
+            -re "(\[0-9\]+)\r\n.*$prompt_pattern" {
+                set count $expect_out(1,string)
+                if {$count >= 3} {
+                    return "running"
+                } else {
+                    return "stopped"
+                }
+            }
+            timeout {
+                return "timeout"
+            }
+        }
+    }
+
+    # Check kubectl pod count
+    # Returns: number of running pods or -1 on error
+    proc check_pod_count {namespace} {
+        variable prompt_pattern
+        send "kubectl get pods -n $namespace --no-headers 2>/dev/null | grep -c Running || echo 0\r"
+        expect {
+            -re "(\[0-9\]+)\r\n.*$prompt_pattern" {
+                return $expect_out(1,string)
+            }
+            timeout {
+                return -1
+            }
+        }
+    }
+
+    # Check ClickHouse via kubectl
+    # Returns: ok, error, or timeout
+    proc check_clickhouse {namespace} {
+        variable prompt_pattern
+        send "kubectl exec -n $namespace clickhouse-0 -- clickhouse-client --query 'SELECT 1' 2>/dev/null\r"
+        expect {
+            "1\r" {
+                expect -re $prompt_pattern
+                return "ok"
+            }
+            -re "error|Error" {
+                expect -re $prompt_pattern
+                return "error"
+            }
+            timeout {
+                return "timeout"
+            }
+        }
+    }
+
+    # Get log count from ClickHouse
+    proc get_log_count {namespace} {
+        variable prompt_pattern
+        send "kubectl exec -n $namespace clickhouse-0 -- clickhouse-client --query 'SELECT count() FROM otel_logs' 2>/dev/null\r"
+        expect {
+            -re "(\[0-9\]+)\r\n.*$prompt_pattern" {
+                return $expect_out(1,string)
+            }
+            timeout {
+                return 0
+            }
+        }
+    }
+
+    # Graceful shutdown
+    proc shutdown {} {
+        variable prompt_pattern
+        send "poweroff\r"
+        expect {
+            "System is going down" {
+                return 1
+            }
+            "Powering off" {
+                return 1
+            }
+            timeout {
+                return 0
+            }
+        }
+    }
+}

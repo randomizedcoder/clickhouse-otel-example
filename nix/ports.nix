@@ -20,15 +20,32 @@
     clickhouseNative = 9000;
     clickhouseInterserver = 9009;
 
-    # MongoDB (HyperDX session storage)
+    # MongoDB (for standalone image builds, not used by ClickStack)
     mongodb = 27017;
 
-    # HyperDX
+    # HyperDX (for standalone image builds, not used by ClickStack)
     hyperdxApi = 8000;
     hyperdxApp = 8080;
 
+    # ClickStack (HyperDX + OTel collector)
+    clickstackUi = 8080;
+    clickstackOtlpGrpc = 4317;
+    clickstackOtlpHttp = 4318;
+
     # SSH (inside VM)
     ssh = 22;
+
+    # GDP Integration - Redpanda (Kafka-compatible)
+    redpandaKafkaInternal = 9092;
+    redpandaKafkaExternal = 19092;
+    redpandaSchemaRegistryInternal = 8081;
+    redpandaSchemaRegistryExternal = 18081;
+    redpandaAdminApi = 9644;
+    redpandaRpc = 33145;
+    redpandaConsole = 8080;
+
+    # GDP (Prometheus metrics collector)
+    gdpPrometheus = 8888;
   };
 
   # ============================================
@@ -38,22 +55,20 @@
   hostForwards = {
     ssh = 22022;
     fluentbitMetrics = 22020;
-    hyperdxApi = 28000;
-    hyperdxApp = 28080;
+    clickstackUi = 28080;
+    clickstackOtlpGrpc = 24317;
+    clickstackOtlpHttp = 24318;
     clickhouseHttp = 28123;
     clickhouseNative = 29000;
-    mongodb = 27017; # Standard port, unlikely to conflict
-    # NodePort forwards (via minikube tunnel on VM localhost)
-    hyperdxApiNodePort = 30800;
-    hyperdxAppNodePort = 30808;
   };
 
   # ============================================
   # Kubernetes NodePorts
   # ============================================
   nodePorts = {
-    hyperdxApi = 30800;
-    hyperdxApp = 30808;
+    clickstackUi = 30808;
+    clickstackOtlpGrpc = 30317;
+    clickstackOtlpHttp = 30318;
   };
 
   # ============================================
@@ -61,10 +76,36 @@
   # Using 3XXXX prefix to avoid conflicts with local services
   # ============================================
   compose = {
-    hyperdxApi = 38000;
-    hyperdxApp = 38080;
-    mongodb = 37017;
+    clickstackUi = 38090;
+    clickstackOtlpGrpc = 34317;
+    clickstackOtlpHttp = 34318;
     clickhouseHttp = 38123;
     clickhouseNative = 39000;
+
+    # GDP Integration
+    redpandaKafka = 39092;
+    redpandaSchemaRegistry = 38081;
+    redpandaConsole = 38085;
+    gdpPrometheus = 38888;
+  };
+
+  # ============================================
+  # Host Forwards (MicroVM -> Host) - GDP Integration
+  # Using 2XXXX prefix to avoid collisions
+  # ============================================
+  hostForwardsGdp = {
+    redpandaKafka = 29092;
+    redpandaSchemaRegistry = 28081;
+    redpandaConsole = 28085;
+    gdpPrometheus = 28888;
+  };
+
+  # ============================================
+  # Console Ports for MicroVM Serial Debugging
+  # Using 245XX prefix (following pcp pattern)
+  # ============================================
+  console = {
+    serial = 24500;  # ttyS0 - slow, early boot (TCP socket)
+    virtio = 24501;  # hvc0 - fast, after drivers (TCP socket)
   };
 }

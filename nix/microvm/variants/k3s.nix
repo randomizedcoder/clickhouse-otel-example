@@ -72,7 +72,7 @@ in
       ${pkgs.k3s}/bin/k3s kubectl wait --for=condition=Ready nodes --all --timeout=120s
 
       echo "Deploying k8s manifests with kustomize..."
-      ${pkgs.k3s}/bin/k3s kubectl apply -k ${k8sManifests}
+      ${pkgs.k3s}/bin/k3s kubectl apply -k ${k8sManifests.default}
 
       echo "Waiting for deployments to be ready..."
       ${pkgs.k3s}/bin/k3s kubectl -n otel-demo wait --for=condition=available deployment --all --timeout=300s || true

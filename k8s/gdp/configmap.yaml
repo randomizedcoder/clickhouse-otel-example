@@ -1,0 +1,52 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gdp-proto-files
+  namespace: otel-demo
+  labels:
+    app: gdp
+data:
+  prometheus.proto: |
+    // Prometheus proto file for GDP
+    // Source: github.com/randomizedcoder/gdp
+    syntax = "proto3";
+    package prometheus;
+    option go_package = "github.com/randomizedcoder/gdp/pkg/prometheus";
+
+    message PromRecordCounter {
+        fixed64 timestamp_ns = 1;
+        string hostname = 2;
+        string pop = 3;
+        string label = 4;
+        string tag = 5;
+        uint64 poll_counter = 6;
+        uint64 record_counter = 7;
+        string function = 8;
+        string variable = 9;
+        string type = 10;
+        double value = 11;
+    }
+  prometheus_protolist.proto: |
+    // Prometheus protolist for GDP Kafka format
+    // Source: github.com/randomizedcoder/gdp
+    syntax = "proto3";
+    package prometheus;
+    option go_package = "github.com/randomizedcoder/gdp/pkg/prometheus";
+
+    message PromRecordCounter {
+        fixed64 timestamp_ns = 1;
+        string hostname = 2;
+        string pop = 3;
+        string label = 4;
+        string tag = 5;
+        uint64 poll_counter = 6;
+        uint64 record_counter = 7;
+        string function = 8;
+        string variable = 9;
+        string type = 10;
+        double value = 11;
+    }
+
+    message PromRecordCounterList {
+        repeated PromRecordCounter records = 1;
+    }

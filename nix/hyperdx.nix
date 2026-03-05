@@ -124,6 +124,13 @@ stdenv.mkDerivation (finalAttrs: {
         cp -r packages/api/build $out/app/packages/api/ 2>/dev/null || true
         cp packages/api/package.json $out/app/packages/api/ 2>/dev/null || true
 
+        # Copy proto files (not included in TypeScript build but needed at runtime)
+        # The code expects proto files at build/src/opamp/proto/
+        if [ -d packages/api/src/opamp/proto ]; then
+          mkdir -p $out/app/packages/api/build/src/opamp/proto
+          cp -r packages/api/src/opamp/proto/* $out/app/packages/api/build/src/opamp/proto/
+        fi
+
         # Create runtime tsconfig for path alias resolution
         # The @/* path alias needs to resolve to build/src/* at runtime
         cat > $out/app/packages/api/tsconfig.json << 'TSCONFIG'

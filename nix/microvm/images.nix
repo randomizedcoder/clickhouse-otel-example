@@ -19,7 +19,13 @@ let
     fluentbit = packages.fluentbit-image;
     clickhouse = packages.clickhouse-image;
     mongodb = packages.mongodb-image;
+    ferretdb = packages.ferretdb-image;
     hyperdx = packages.hyperdx-image;
+    gdp = packages.gdp-image;
+    # Pulled images (external projects)
+    otel-collector = packages.otel-collector-image;
+    redpanda = packages.redpanda-image;
+    redpanda-console = packages.redpanda-console-image;
   };
 
   # Variant-specific image load commands

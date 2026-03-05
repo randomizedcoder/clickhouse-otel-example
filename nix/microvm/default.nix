@@ -104,5 +104,28 @@ in {
 
     # Graphics disabled (headless)
     graphics.enable = false;
+
+    # QEMU configuration for serial console debugging
+    # NOTE: The "microvm" machine type has no PCI bus, so we can't use virtio-serial-pci.
+    # We use only the ISA serial port (ttyS0) over TCP for boot debugging.
+    qemu = {
+      # Disable default serial console (we configure a TCP-accessible one)
+      serialConsole = false;
+
+      extraArgs = [
+        # VM identification (for ps/pgrep matching)
+        "-name" "otel-demo,process=otel-demo"
+
+        # Serial console on TCP (ttyS0) - available at early boot
+        # The microvm machine type supports ISA serial via -serial
+        "-serial" "tcp:127.0.0.1:${toString ports.console.serial},server,nowait"
+      ];
+    };
   };
+
+  # Console output configuration - send to serial console
+  # NOTE: hvc0 (virtio console) not available on microvm machine type (no PCI)
+  boot.kernelParams = [
+    "console=ttyS0,115200"  # Serial console for boot messages
+  ];
 }

@@ -34,6 +34,13 @@ data:
         <max_concurrent_queries>100</max_concurrent_queries>
 
         <mark_cache_size>5368709120</mark_cache_size>
+
+        <!-- Kafka engine configuration for GDP -->
+        <kafka>
+            <debug>cgrp</debug>
+            <auto_offset_reset>smallest</auto_offset_reset>
+        </kafka>
+        <format_schema_path>/var/lib/clickhouse/format_schemas/</format_schema_path>
     </clickhouse>
 
   users.xml: |
@@ -127,3 +134,86 @@ data:
     ORDER BY (ServiceName, TimestampTime, Timestamp)
     TTL TimestampTime + INTERVAL 7 DAY
     SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+  init-gdp.sql: |
+    -- GDP Database and Tables
+    -- Source: github.com/randomizedcoder/gdp
+    -- Creates tables for storing Prometheus metrics via Kafka using Protobuf format
+
+    CREATE DATABASE IF NOT EXISTS gdp;
+
+    -- ProtobufSingle table for storing Prometheus metrics
+    -- Schema matches prometheus_protolist.proto PromRecordCounter message
+    CREATE TABLE IF NOT EXISTS gdp.ProtobufSingle (
+        Timestamp_Ns DateTime64(9,'UTC') CODEC(DoubleDelta, LZ4),
+        Hostname LowCardinality(String) CODEC(LZ4),
+        Pop LowCardinality(String) CODEC(LZ4),
+        Label LowCardinality(String) CODEC(LZ4),
+        Tag LowCardinality(String) CODEC(LZ4),
+        Poll_Counter UInt64 CODEC(DoubleDelta, LZ4),
+        Record_Counter UInt64 CODEC(DoubleDelta, LZ4),
+        Function LowCardinality(String) CODEC(LZ4),
+        Variable LowCardinality(String) CODEC(LZ4),
+        Type LowCardinality(String) CODEC(LZ4),
+        Value Float64
+    )
+    ENGINE = MergeTree()
+    PARTITION BY toYYYYMM(Timestamp_Ns)
+    ORDER BY (Timestamp_Ns, Hostname, Pop, Label, Tag, Poll_Counter, Record_Counter)
+    TTL toDateTime(Timestamp_Ns) + INTERVAL 14 DAY;
+
+    -- Kafka engine table using ProtobufSingle format
+    -- Reads from Redpanda using prometheus_protolist.proto schema
+    CREATE TABLE IF NOT EXISTS gdp.ProtobufSingle_kafka (
+        Timestamp_Ns DateTime64(9,'UTC') CODEC(DoubleDelta, LZ4),
+        Hostname LowCardinality(String) CODEC(LZ4),
+        Pop LowCardinality(String) CODEC(LZ4),
+        Label LowCardinality(String) CODEC(LZ4),
+        Tag LowCardinality(String) CODEC(LZ4),
+        Poll_Counter UInt64 CODEC(DoubleDelta, LZ4),
+        Record_Counter UInt64 CODEC(DoubleDelta, LZ4),
+        Function LowCardinality(String) CODEC(LZ4),
+        Variable LowCardinality(String) CODEC(LZ4),
+        Type LowCardinality(String) CODEC(LZ4),
+        Value Float64
+    )
+    ENGINE = Kafka
+    SETTINGS
+        kafka_broker_list = 'redpanda:9092',
+        kafka_topic_list = 'ProtobufSingle',
+        kafka_group_name = 'clickhouse_gdp_consumer',
+        kafka_schema = 'prometheus_protolist.proto:PromRecordCounter',
+        kafka_handle_error_mode = 'stream',
+        kafka_poll_max_batch_size = 1024,
+        kafka_format = 'ProtobufSingle';
+
+    -- Materialized view to move data from Kafka to MergeTree
+    CREATE MATERIALIZED VIEW IF NOT EXISTS gdp.ProtobufSingle_mv
+    TO gdp.ProtobufSingle
+    AS SELECT * FROM gdp.ProtobufSingle_kafka;
+
+  prometheus_protolist.proto: |
+    // Prometheus protolist for GDP Kafka format
+    // Source: github.com/randomizedcoder/gdp
+    // Field numbers must match exactly what GDP encodes
+    syntax = "proto3";
+
+    package prometheus.v1;
+
+    option go_package = "./pkg/prometheus";
+
+    // PromRecordCounter matches the GDP encoder's Protobuf format
+    // Field numbers are 10, 20, 30... as defined in GDP source
+    message PromRecordCounter {
+        double timestamp_ns = 10;
+        string hostname = 20;
+        string pop = 30;
+        string label = 50;
+        string tag = 60;
+        uint64 poll_counter = 70;
+        uint64 record_counter = 80;
+        string function = 90;
+        string variable = 100;
+        string type = 110;
+        double value = 120;
+    }
