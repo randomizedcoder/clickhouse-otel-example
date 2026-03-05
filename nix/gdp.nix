@@ -158,6 +158,25 @@ let
     CREATE MATERIALIZED VIEW IF NOT EXISTS ${constants.databases.gdp}.ProtobufSingle_mv
     TO ${constants.databases.gdp}.ProtobufSingle
     AS SELECT * FROM ${constants.databases.gdp}.ProtobufSingle_kafka;
+
+    -- GDP logs view for HyperDX compatibility
+    -- Transforms GDP metrics into log format for visualization in HyperDX UI
+    CREATE OR REPLACE VIEW default.gdp_logs AS
+    SELECT
+        Timestamp_Ns as Timestamp,
+        toDateTime(Timestamp_Ns) as TimestampTime,
+        Hostname as ServiceName,
+        'INFO' as SeverityText,
+        concat(Function, ': ', Variable, ' = ', toString(Value)) as Body,
+        '' as TraceId,
+        '' as SpanId,
+        Function,
+        Variable,
+        Type,
+        Value,
+        Poll_Counter,
+        Record_Counter
+    FROM ${constants.databases.gdp}.ProtobufSingle;
   '';
 
 in
