@@ -750,12 +750,9 @@ let
   # Script to setup ClickHouse tables (ClickStack handles UI config automatically)
   composeSetup = pkgs.writeShellApplication {
     name = "compose-setup";
-    runtimeInputs = [ pkgs.curl pkgs.docker ];
+    runtimeInputs = [ pkgs.docker ];
     text = ''
       set -euo pipefail
-
-      CLICKHOUSE_URL="http://localhost:${toString ports.compose.clickhouseHttp}"
-      CLICKSTACK_URL="http://localhost:${toString ports.compose.clickstackUi}"
 
       # ============================================
       # 1. Setup ClickHouse Tables
@@ -798,7 +795,7 @@ let
       echo "  - OTel Logs: default.otel_logs (MergeTree)"
       echo "  - GDP Tables: ${constants.databases.gdp}.ProtobufSingle (MergeTree + Kafka + MV)"
       echo ""
-      echo "Open ClickStack UI: $CLICKSTACK_URL"
+      echo "Open ClickStack UI: http://localhost:${toString ports.compose.clickstackUi}"
       echo "Configure data source via Team Settings in the UI"
     '';
   };
